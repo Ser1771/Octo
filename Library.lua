@@ -390,6 +390,8 @@ local Templates = {
         SnapAvoidCoreGui = true,
 
         SearchbarSize = UDim2.new(0, 180, 1, 0),
+        SearchbarCollapsible = true, -- collapses to an icon while unfocused and empty
+        SearchbarCollapsedWidth = 32,
         GlobalSearch = false,
 
         CornerRadius = 4,
@@ -440,6 +442,18 @@ local Templates = {
             Indicator = false,
             IndicatorWidth = 2,
             IndicatorHeight = 20,
+        },
+
+        --// Sub Pages \\--
+        SubPageStyle = {
+            Style = "Pill", -- "Pill" | "Underline" | "Flat"
+            Gap = 4,
+            Height = 26,
+            PaddingX = 10,
+            TextSize = 14,
+            -- CornerRadius = 4, (optional, follows the window corner radius when omitted)
+            ShowStroke = true,
+            IndicatorHeight = 2,
         },
     },
     Groupbox = {
@@ -762,6 +776,336 @@ local function Round(Value, Rounding)
     return tonumber(string.format("%." .. Rounding .. "f", Value))
 end
 
+--// Rich Text \\--
+local RichEntities = { lt = "<", gt = ">", amp = "&", quot = '"', apos = "'", nbsp = " " }
+local RichCharPattern = "^" .. utf8.charpattern
+
+local function EscapeRichText(Text: any): string
+    return (tostring(Text):gsub("&", "&amp;"):gsub("<", "&lt;"):gsub(">", "&gt;"):gsub('"', "&quot;"):gsub("'", "&apos;"))
+end
+
+--// Splits a rich text string into tags (<b>, </font>, ...) and visible characters (entities count as one character) \\--
+local function TokenizeRichText(Text: string)
+    local Tokens = {}
+    local Index = 1
+    local Length = #Text
+
+    while Index <= Length do
+        local Char = Text:sub(Index, Index)
+
+        if Char == "<" then
+            local TagEnd = Text:find(">", Index + 1, true)
+            local NextOpen = Text:find("<", Index + 1, true)
+
+            if TagEnd and (not NextOpen or NextOpen > TagEnd) then
+                table.insert(Tokens, { Tag = true, Raw = Text:sub(Index, TagEnd) })
+                Index = TagEnd + 1
+                continue
+            end
+        elseif Char == "&" then
+            local Entity = Text:match("^&(#?%w+);", Index)
+
+            if Entity then
+                local Decoded = RichEntities[Entity]
+                if not Decoded and Entity:sub(1, 1) == "#" then
+                    local Code
+                    if Entity:sub(2, 2):lower() == "x" then
+                        Code = tonumber(Entity:sub(3), 16)
+                    else
+                        Code = tonumber(Entity:sub(2))
+                    end
+
+                    local Ok, Result = pcall(utf8.char, Code or 63)
+                    Decoded = Ok and Result or "?"
+                end
+
+                table.insert(Tokens, { Raw = Text:sub(Index, Index + #Entity + 1), Char = Decoded or "?" })
+                Index += #Entity + 2
+                continue
+            end
+        end
+
+        local Match = Text:match(RichCharPattern, Index) or Char
+        table.insert(Tokens, { Raw = Match, Char = Match })
+        Index += #Match
+    end
+
+    return Tokens
+end
+
+local function StripRichText(Text: string): string
+    if not Text:find("[<&]") then
+        return Text
+    end
+
+    local Out = {}
+    for _, Token in TokenizeRichText(Text) do
+        if not Token.Tag then
+            table.insert(Out, Token.Char)
+        end
+    end
+
+    return table.concat(Out)
+end
+
+--// Truncates visible characters only, keeps the markup valid by closing every tag that is still open \\--
+local function TruncateRichText(Text: string, Max: number, Keep: number): string
+    if not Text:find("[<&]") then
+        local Len = utf8.len(Text) or #Text
+        if Len <= Max then
+            return Text
+        end
+
+        local Cut = utf8.offset(Text, Keep + 1)
+        return Text:sub(1, (Cut or (Keep + 1)) - 1) .. "..."
+    end
+
+    local Tokens = TokenizeRichText(Text)
+    local Count = 0
+    for _, Token in Tokens do
+        if not Token.Tag then
+            Count += 1
+        end
+    end
+    if Count <= Max then
+        return Text
+    end
+
+    local Out, Open, Visible = {}, {}, 0
+    for _, Token in Tokens do
+        if Token.Tag then
+            table.insert(Out, Token.Raw)
+
+            local Closing = Token.Raw:match("^</(%w+)")
+            local Opening = Token.Raw:match("^<(%w+)")
+            if Closing then
+                for Index = #Open, 1, -1 do
+                    if Open[Index] == Closing then
+                        table.remove(Open, Index)
+                        break
+                    end
+                end
+            elseif Opening and not Token.Raw:find("/>$") then
+                table.insert(Open, Opening)
+            end
+        else
+            if Visible >= Keep then
+                break
+            end
+
+            table.insert(Out, Token.Raw)
+            Visible += 1
+        end
+    end
+
+    table.insert(Out, "...")
+    for Index = #Open, 1, -1 do
+        table.insert(Out, "</" .. Open[Index] .. ">")
+    end
+
+    return table.concat(Out)
+end
+
+function Library:EscapeRichText(Text: any): string
+    return EscapeRichText(Text)
+end
+
+function Library:StripRichText(Text: string): string
+    return StripRichText(Text)
+end
+
+--// Search Highlight \\--
+local function BuildHighlightedText(Text: any, Search: string): string?
+    if typeof(Text) ~= "string" or Text == "" or Search == "" then
+        return nil
+    end
+
+    local Tokens = TokenizeRichText(Text)
+    local Plain = {}
+    for _, Token in Tokens do
+        if not Token.Tag then
+            table.insert(Plain, Token)
+        end
+    end
+    if #Plain == 0 then
+        return nil
+    end
+
+    local Lowered, StartBytes, Cursor = {}, {}, 1
+    for Index, Token in Plain do
+        local Lower = Token.Char:lower()
+        Lowered[Index] = Lower
+        StartBytes[Index] = Cursor
+        Cursor += #Lower
+    end
+    local Joined = table.concat(Lowered)
+
+    local Matched = {}
+    local Found = false
+
+    local ExactStart = Joined:find(Search, 1, true)
+    if ExactStart then
+        local ExactEnd = ExactStart + #Search - 1
+        for Index = 1, #Plain do
+            if StartBytes[Index] >= ExactStart and StartBytes[Index] <= ExactEnd then
+                Matched[Index] = true
+            end
+        end
+
+        Found = true
+    else
+        local SearchChars = {}
+        for Char in Search:gmatch(utf8.charpattern) do
+            table.insert(SearchChars, Char)
+        end
+
+        local SearchIndex = 1
+        for Index = 1, #Plain do
+            if SearchIndex > #SearchChars then
+                break
+            end
+
+            if Lowered[Index] == SearchChars[SearchIndex] then
+                Matched[Index] = true
+                SearchIndex += 1
+            end
+        end
+
+        Found = SearchIndex > #SearchChars
+    end
+
+    if not Found then
+        return nil
+    end
+
+    local OpenTag = string.format('<mark color="#%s" transparency="0.6">', Library.Scheme.AccentColor:ToHex())
+    local Out, PlainIndex, IsOpen = {}, 0, false
+
+    for _, Token in Tokens do
+        if Token.Tag then
+            if IsOpen then
+                table.insert(Out, "</mark>")
+                IsOpen = false
+            end
+
+            table.insert(Out, Token.Raw)
+        else
+            PlainIndex += 1
+
+            if Matched[PlainIndex] then
+                if not IsOpen then
+                    table.insert(Out, OpenTag)
+                    IsOpen = true
+                end
+            elseif IsOpen then
+                table.insert(Out, "</mark>")
+                IsOpen = false
+            end
+
+            table.insert(Out, Token.Raw)
+        end
+    end
+
+    if IsOpen then
+        table.insert(Out, "</mark>")
+    end
+
+    return table.concat(Out)
+end
+
+--// Target = anything with `HighlightLabel` and (`Text` or `Name`) \\--
+local function ClearHighlight(Target)
+    if not Target or not Target.Highlighted then
+        return
+    end
+
+    Target.Highlighted = false
+
+    local Label = Target.HighlightLabel
+    if Label and Label.Parent then
+        local Source = Target.Text
+        if typeof(Source) ~= "string" then
+            Source = Target.Name
+        end
+
+        Label.Text = typeof(Source) == "string" and Source or ""
+    end
+end
+
+local function ClearElementHighlight(ElementInfo)
+    ClearHighlight(ElementInfo)
+    if ElementInfo.SubButton then
+        ClearHighlight(ElementInfo.SubButton)
+    end
+end
+
+local function HighlightTarget(Target, Search: string)
+    if not Target then
+        return
+    end
+
+    local Label = Target.HighlightLabel
+    if not (Label and Label.Parent) then
+        return
+    end
+
+    local Source = Target.Text
+    if typeof(Source) ~= "string" then
+        Source = Target.Name
+    end
+
+    local Highlighted = BuildHighlightedText(Source, Search)
+    if Highlighted then
+        Label.Text = Highlighted
+        Target.Highlighted = true
+    else
+        ClearHighlight(Target)
+    end
+end
+
+local function HighlightElements(Elements, DependencyBoxes, Search: string)
+    for _, ElementInfo in Elements do
+        if ElementInfo.Type == "Divider" or not (ElementInfo.Holder and ElementInfo.Holder.Visible) then
+            continue
+        end
+
+        HighlightTarget(ElementInfo, Search)
+        if ElementInfo.SubButton then
+            HighlightTarget(ElementInfo.SubButton, Search)
+        end
+    end
+
+    for _, Depbox in DependencyBoxes or {} do
+        if Depbox.Visible then
+            HighlightElements(Depbox.Elements, Depbox.DependencyBoxes, Search)
+        end
+    end
+end
+
+local function HighlightTab(Tab, Search: string)
+    HighlightTarget(Tab, Search)
+
+    for _, Groupbox in Tab.Groupboxes do
+        if Groupbox.Visible == false or not Groupbox.BoxHolder.Visible then
+            continue
+        end
+
+        HighlightTarget(Groupbox, Search)
+        HighlightElements(Groupbox.Elements, Groupbox.DependencyBoxes, Search)
+    end
+
+    for _, Tabbox in Tab.Tabboxes do
+        if not Tabbox.BoxHolder.Visible then
+            continue
+        end
+
+        for _, SubTab in Tabbox.Tabs do
+            HighlightTarget(SubTab, Search)
+            HighlightElements(SubTab.Elements, SubTab.DependencyBoxes, Search)
+        end
+    end
+end
+
 --// Fuzzy Search \\--
 local function FuzzyScore(Text: string, Search: string): (boolean, number)
     if Search == "" then
@@ -825,7 +1169,7 @@ local function TryFuzzyMatch(Text: any, Search: string): (boolean, number)
         return false, 0
     end
 
-    return FuzzyScore(Text:lower(), Search)
+    return FuzzyScore(StripRichText(Text):lower(), Search)
 end
 
 local function FuzzyMatchScore(Text: any, Search: string): number
@@ -833,7 +1177,7 @@ local function FuzzyMatchScore(Text: any, Search: string): number
         return 0
     end
 
-    local Normalized = NormalizeSearch(Text:lower())
+    local Normalized = NormalizeSearch(StripRichText(Text):lower())
     local Matched, Score = FuzzyScore(Normalized, Search)
     if not Matched then
         return 0
@@ -991,6 +1335,7 @@ local function CheckDepbox(Box, Search, ForceVisible: boolean?)
 end
 local function RestoreDepbox(Box)
     for _, ElementInfo in Box.Elements do
+        ClearElementHighlight(ElementInfo)
         ElementInfo.Holder.Visible = ElementInfo.Visible ~= false
 
         if ElementInfo.SubButton then
@@ -1313,8 +1658,13 @@ local function ResetTab(Tab)
         return
     end
 
+    ClearHighlight(Tab)
+
     for _, Groupbox in Tab.Groupboxes do
+        ClearHighlight(Groupbox)
+
         for _, ElementInfo in Groupbox.Elements do
+            ClearElementHighlight(ElementInfo)
             ElementInfo.Holder.Visible = ElementInfo.Visible ~= false
 
             if ElementInfo.SubButton then
@@ -1338,7 +1688,10 @@ local function ResetTab(Tab)
 
     for _, Tabbox in Tab.Tabboxes do
         for _, SubTab in Tabbox.Tabs do
+            ClearHighlight(SubTab)
+
             for _, ElementInfo in SubTab.Elements do
+                ClearElementHighlight(ElementInfo)
                 ElementInfo.Holder.Visible = ElementInfo.Visible ~= false
 
                 if ElementInfo.SubButton then
@@ -1404,6 +1757,8 @@ function Library:UpdateSearch(SearchText)
         if not HasVisible then
             continue
         end
+
+        HighlightTab(Tab, Search)
 
         if Tab == Library.ActiveTab then
             ActiveHasVisible = true
@@ -6446,6 +6801,7 @@ do
         end
 
         Label.Holder = TextLabel
+        Label.HighlightLabel = TextLabel
         table.insert(Groupbox.Elements, Label)
 
         if Data.Idx then
@@ -6760,6 +7116,7 @@ do
         end
 
         Button.Base, Button.Stroke = CreateButton(Button)
+        Button.HighlightLabel = Button.Label
         InitEvents(Button)
 
         function Button:AddButton(...)
@@ -6795,6 +7152,7 @@ do
 
             Button.SubButton = SubButton
             SubButton.Base, SubButton.Stroke = CreateButton(SubButton)
+            SubButton.HighlightLabel = SubButton.Label
             InitEvents(SubButton)
 
             function SubButton:UpdateColors()
@@ -7214,6 +7572,7 @@ do
         Groupbox:Resize()
 
         Toggle.TextLabel = Label
+        Toggle.HighlightLabel = Label
         Toggle.Container = Container
         setmetatable(Toggle, BaseAddons)
 
@@ -7488,6 +7847,7 @@ do
         Groupbox:Resize()
 
         Toggle.TextLabel = Label
+        Toggle.HighlightLabel = Label
         Toggle.Container = Container
         setmetatable(Toggle, BaseAddons)
 
@@ -7753,6 +8113,7 @@ do
         Groupbox:Resize()
 
         Input.Holder = Holder
+        Input.HighlightLabel = Label
         table.insert(Groupbox.Elements, Input)
 
         Input.Default = Input.Value
@@ -8208,6 +8569,7 @@ do
         Groupbox:Resize()
 
         Slider.Holder = Holder
+        Slider.HighlightLabel = SliderLabel
         table.insert(Groupbox.Elements, Slider)
 
         Slider.Default = Slider.Value
@@ -8544,9 +8906,7 @@ do
                 end
             end
 
-            if #Str > 25 then
-                Str = Str:sub(1, 22) .. "..."
-            end
+            Str = TruncateRichText(Str, 25, 22)
 
             DisplayButton.Text = (Str == "" and "---" or Str)
 
@@ -8611,7 +8971,7 @@ do
 
                 local MatchScore = 0
                 if IsSearching then
-                    local Matched, Score = FuzzyScore(FormattedValue:lower(), SearchQuery)
+                    local Matched, Score = FuzzyScore(StripRichText(FormattedValue):lower(), SearchQuery)
                     if not Matched then
                         continue
                     end
@@ -9329,6 +9689,7 @@ do
         Groupbox:Resize()
 
         Dropdown.Holder = Holder
+        Dropdown.HighlightLabel = Dropdown.Text and Label or nil
         table.insert(Groupbox.Elements, Dropdown)
 
         Dropdown.Default = Defaults
@@ -10067,6 +10428,129 @@ do
         end
 
         return Passthrough
+    end
+
+    --// Multi-column rows: Groupbox:AddRow():AddToggle(...) / :AddDropdown(...) share one line (equal widths) \\--
+    function Funcs:AddRow(Info)
+        if self.Destroyed then
+            return nil
+        end
+
+        Info = typeof(Info) == "table" and Info or {}
+
+        local Groupbox = self
+        local Container = Groupbox.Container
+
+        local VerticalAlignment = Info.VerticalAlignment
+        if typeof(VerticalAlignment) == "string" then
+            VerticalAlignment = Enum.VerticalAlignment[VerticalAlignment]
+        end
+
+        local RowFrame = New("Frame", {
+            AutomaticSize = Enum.AutomaticSize.Y,
+            BackgroundTransparency = 1,
+            Size = UDim2.new(1, 0, 0, 0),
+            Visible = false,
+            Parent = Container,
+        })
+        New("UIListLayout", {
+            FillDirection = Enum.FillDirection.Horizontal,
+            HorizontalFlex = Enum.UIFlexAlignment.Fill,
+            VerticalAlignment = VerticalAlignment or Enum.VerticalAlignment.Top,
+            Padding = UDim.new(0, tonumber(Info.Padding) or 8),
+            Parent = RowFrame,
+        })
+
+        --// Behaves like a groupbox, but every element it creates lives in the row and is registered in the parent box \\--
+        local Row = {
+            Type = "Row",
+
+            Connections = {},
+            Destroyed = false,
+
+            Holder = RowFrame,
+            Container = RowFrame,
+
+            Elements = Groupbox.Elements,
+            DependencyBoxes = Groupbox.DependencyBoxes,
+
+            Tab = Groupbox.Tab,
+            IsKeyTab = Groupbox.IsKeyTab,
+
+            Parent = Groupbox,
+        }
+
+        function Row:Resize()
+            Groupbox:Resize()
+        end
+
+        local function RefreshVisible()
+            if Row.Destroyed then
+                return
+            end
+
+            local Any = false
+            for _, Child in RowFrame:GetChildren() do
+                if Child:IsA("GuiObject") and Child.Visible then
+                    Any = true
+                    break
+                end
+            end
+
+            if RowFrame.Visible ~= Any then
+                RowFrame.Visible = Any
+                Groupbox:Resize()
+            end
+        end
+
+        table.insert(Row.Connections, RowFrame.ChildAdded:Connect(function(Child)
+            if not Child:IsA("GuiObject") then
+                return
+            end
+
+            table.insert(Row.Connections, Child:GetPropertyChangedSignal("Visible"):Connect(RefreshVisible))
+            RefreshVisible()
+        end))
+        table.insert(Row.Connections, RowFrame.ChildRemoved:Connect(function()
+            task.defer(RefreshVisible)
+        end))
+
+        function Row:Destroy()
+            Row.Destroyed = true
+
+            local Members = {}
+            for _, Element in Row.Elements do
+                if Element.Holder and Element.Holder.Parent == RowFrame then
+                    table.insert(Members, Element)
+                end
+            end
+            for _, Element in Members do
+                if Element.Destroy then
+                    Element:Destroy()
+                end
+            end
+
+            for _, Connection in Row.Connections do
+                Connection:Disconnect()
+            end
+
+            RowFrame:Destroy()
+            Groupbox:Resize()
+        end
+
+        --// Lets the parent box clean the row's signals up when it gets destroyed \\--
+        if Groupbox.Connections then
+            table.insert(Groupbox.Connections, {
+                Disconnect = function()
+                    for _, Connection in Row.Connections do
+                        Connection:Disconnect()
+                    end
+                end,
+            })
+        end
+
+        setmetatable(Row, BaseGroupbox)
+        return Row
     end
 
     function Funcs:AddDependencyBox()
@@ -10885,6 +11369,26 @@ function Library:CreateWindow(WindowInfo)
 
     local TabButtonsStyle = WindowInfo.TabButtonsStyle
 
+    local SubPageStyle = WindowInfo.SubPageStyle
+    local function NormalizeSubPageStyle()
+        local Style = string.lower(tostring(SubPageStyle.Style))
+        if Style ~= "pill" and Style ~= "underline" and Style ~= "flat" then
+            Style = "pill"
+        end
+
+        SubPageStyle.Style = Style
+        SubPageStyle.Gap = math.max(0, tonumber(SubPageStyle.Gap) or 4)
+        SubPageStyle.Height = math.max(16, tonumber(SubPageStyle.Height) or 26)
+        SubPageStyle.PaddingX = math.max(0, tonumber(SubPageStyle.PaddingX) or 10)
+        SubPageStyle.TextSize = math.max(8, tonumber(SubPageStyle.TextSize) or 14)
+        SubPageStyle.IndicatorHeight = math.max(1, tonumber(SubPageStyle.IndicatorHeight) or 2)
+        SubPageStyle.ShowStroke = SubPageStyle.ShowStroke ~= false
+        if typeof(SubPageStyle.CornerRadius) ~= "number" then
+            SubPageStyle.CornerRadius = nil
+        end
+    end
+    NormalizeSubPageStyle()
+
     --// Old Naming \\--
     if WindowInfo.Compact ~= nil then
         WindowInfo.SidebarCompacted = WindowInfo.Compact
@@ -10924,6 +11428,8 @@ function Library:CreateWindow(WindowInfo)
     local SearchBox
     local SubPageHolder
     local SubPageList
+    local SearchCollapsed = false
+    local SetSearchCollapsed
     local CurrentTabInfo
     local CurrentTabLabel
     local CurrentTabDescription
@@ -11166,28 +11672,33 @@ function Library:CreateWindow(WindowInfo)
         })
 
         --// Sub Pages (shown on the left of the search bar) \\--
-        --// Fills all the free space on the left of the search bar (more room when the tab has no description) and scrolls horizontally on overflow \\--
-        SubPageHolder = New("ScrollingFrame", {
-            AutomaticCanvasSize = Enum.AutomaticSize.None,
+        --// Sub page strip: fills the free space on the left of the search bar, scrolls horizontally and shows arrows on overflow \\--
+        local SubPageWrapper = New("Frame", {
             BackgroundTransparency = 1,
-            CanvasSize = UDim2.fromOffset(0, 0),
+            ClipsDescendants = true,
             LayoutOrder = 1,
-            ScrollBarImageColor3 = "OutlineColor",
-            ScrollBarThickness = 2,
-            ScrollingDirection = Enum.ScrollingDirection.X,
             Size = UDim2.new(0, 0, 1, 0),
-            VerticalScrollBarInset = Enum.ScrollBarInset.None,
             Parent = RightWrapper,
         })
         New("UIFlexItem", {
             FlexMode = Enum.UIFlexMode.Grow,
-            Parent = SubPageHolder,
+            Parent = SubPageWrapper,
+        })
+
+        SubPageHolder = New("ScrollingFrame", {
+            AutomaticCanvasSize = Enum.AutomaticSize.None,
+            BackgroundTransparency = 1,
+            CanvasSize = UDim2.fromOffset(0, 0),
+            ScrollBarThickness = 0,
+            ScrollingDirection = Enum.ScrollingDirection.X,
+            Size = UDim2.fromScale(1, 1),
+            Parent = SubPageWrapper,
         })
         SubPageList = New("UIListLayout", {
             FillDirection = Enum.FillDirection.Horizontal,
             HorizontalAlignment = Enum.HorizontalAlignment.Left, --// Switches to Right while a tab description is shown \\--
             VerticalAlignment = Enum.VerticalAlignment.Center,
-            Padding = UDim.new(0, 4),
+            Padding = UDim.new(0, SubPageStyle.Gap),
             Parent = SubPageHolder,
         })
         New("UIPadding", {
@@ -11196,22 +11707,106 @@ function Library:CreateWindow(WindowInfo)
             Parent = SubPageHolder,
         })
 
+        local SubPageArrowLeft, SubPageArrowRight
+        local function CreateSubPageArrow(IsRight: boolean)
+            local Arrow = New("TextButton", {
+                AnchorPoint = Vector2.new(IsRight and 1 or 0, 0),
+                BackgroundTransparency = 1,
+                Position = UDim2.fromScale(IsRight and 1 or 0, 0),
+                Size = UDim2.new(0, 28, 1, 0),
+                Text = "",
+                Visible = false,
+                ZIndex = 5,
+                Parent = SubPageWrapper,
+            })
+
+            local Fade = New("Frame", {
+                BackgroundColor3 = function()
+                    return Library:GetBetterColor(Library.Scheme.BackgroundColor, -1)
+                end,
+                Size = UDim2.fromScale(1, 1),
+                ZIndex = 6,
+                Parent = Arrow,
+            })
+            New("UIGradient", {
+                Transparency = NumberSequence.new(if IsRight then {
+                    NumberSequenceKeypoint.new(0, 1),
+                    NumberSequenceKeypoint.new(0.4, 0.1),
+                    NumberSequenceKeypoint.new(1, 0),
+                } else {
+                    NumberSequenceKeypoint.new(0, 0),
+                    NumberSequenceKeypoint.new(0.6, 0.1),
+                    NumberSequenceKeypoint.new(1, 1),
+                }),
+                Parent = Fade,
+            })
+
+            local ArrowImage = New("ImageLabel", {
+                AnchorPoint = Vector2.new(IsRight and 1 or 0, 0.5),
+                ImageColor3 = "FontColor",
+                ImageTransparency = 0.3,
+                Position = UDim2.new(IsRight and 1 or 0, IsRight and -4 or 4, 0.5, 0),
+                Size = UDim2.fromOffset(14, 14),
+                ZIndex = 7,
+                Parent = Arrow,
+            })
+            if ArrowIcon then
+                Library:ApplyLucideIcon(ArrowImage, ArrowIcon, IsRight and 90 or -90)
+            else
+                ArrowImage.Visible = false
+                New("TextLabel", {
+                    BackgroundTransparency = 1,
+                    Size = UDim2.fromScale(1, 1),
+                    Text = IsRight and ">" or "<",
+                    TextSize = 16,
+                    TextTransparency = 0.3,
+                    ZIndex = 7,
+                    Parent = Arrow,
+                })
+            end
+
+            Library:GiveSignal(Arrow.MouseButton1Click:Connect(function()
+                local MaxScroll = math.max(0, SubPageHolder.AbsoluteCanvasSize.X - SubPageHolder.AbsoluteSize.X)
+                local Step = SubPageHolder.AbsoluteSize.X * 0.6
+                local Target = math.clamp(SubPageHolder.CanvasPosition.X + (IsRight and Step or -Step), 0, MaxScroll)
+
+                TweenService:Create(SubPageHolder, Library.DropdownTransitionInfo, {
+                    CanvasPosition = Vector2.new(Target, 0),
+                }):Play()
+            end))
+
+            return Arrow
+        end
+        SubPageArrowLeft = CreateSubPageArrow(false)
+        SubPageArrowRight = CreateSubPageArrow(true)
+
+        local function UpdateSubPageArrows()
+            local MaxScroll = SubPageHolder.AbsoluteCanvasSize.X - SubPageHolder.AbsoluteSize.X
+            local Position = SubPageHolder.CanvasPosition.X
+
+            SubPageArrowLeft.Visible = Position > 1
+            SubPageArrowRight.Visible = Position < MaxScroll - 1
+        end
+
         local function UpdateSubPageCanvas()
             local Scale = Library.DPIScale
             local ContentX = SubPageList.AbsoluteContentSize.X / Scale + 16 --// + side padding
             local ViewX = SubPageHolder.AbsoluteSize.X / Scale
 
-            --// Canvas is never smaller than the view so the buttons stay right-aligned (next to the search bar) \\--
+            --// Canvas is never smaller than the view so the buttons can stay right-aligned (next to the search bar) \\--
             SubPageHolder.CanvasSize = UDim2.fromOffset(math.max(ContentX, ViewX), 0)
+            UpdateSubPageArrows()
         end
         Library:GiveSignal(SubPageList:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(UpdateSubPageCanvas))
         Library:GiveSignal(SubPageHolder:GetPropertyChangedSignal("AbsoluteSize"):Connect(UpdateSubPageCanvas))
+        Library:GiveSignal(SubPageHolder:GetPropertyChangedSignal("AbsoluteCanvasSize"):Connect(UpdateSubPageArrows))
+        Library:GiveSignal(SubPageHolder:GetPropertyChangedSignal("CanvasPosition"):Connect(UpdateSubPageArrows))
 
         SearchBox = New("TextBox", {
             BackgroundColor3 = "MainColor",
             LayoutOrder = 2,
-            PlaceholderText = "Search",
-            Size = WindowInfo.SearchbarSize,
+            PlaceholderText = WindowInfo.SearchbarCollapsible and "" or "Search",
+            Size = WindowInfo.SearchbarCollapsible and UDim2.new(0, WindowInfo.SearchbarCollapsedWidth, 1, 0) or WindowInfo.SearchbarSize,
             TextScaled = true,
             Visible = not (WindowInfo.DisableSearch or false),
             Parent = RightWrapper,
@@ -11264,6 +11859,36 @@ function Library:CreateWindow(WindowInfo)
             })
             Library:ApplyLucideIcon(SearchIconImage, SearchIcon)
         end
+
+        --// Search bar collapse (icon only while unfocused and empty) \\--
+        SearchCollapsed = WindowInfo.SearchbarCollapsible == true
+        local SearchTween
+        SetSearchCollapsed = function(Collapsed: boolean)
+            if WindowInfo.SearchbarCollapsible ~= true then
+                Collapsed = false
+            end
+            if SearchCollapsed == Collapsed then
+                return
+            end
+
+            SearchCollapsed = Collapsed
+            StopTween(SearchTween, true)
+
+            SearchBox.PlaceholderText = Collapsed and "" or "Search"
+            SearchTween = TweenService:Create(SearchBox, Library.DropdownTransitionInfo, {
+                Size = Collapsed and UDim2.new(0, WindowInfo.SearchbarCollapsedWidth, 1, 0) or WindowInfo.SearchbarSize,
+            })
+            SearchTween:Play()
+        end
+
+        Library:GiveSignal(SearchBox.Focused:Connect(function()
+            SetSearchCollapsed(false)
+        end))
+        Library:GiveSignal(SearchBox.FocusLost:Connect(function()
+            if Trim(SearchBox.Text) == "" then
+                SetSearchCollapsed(true)
+            end
+        end))
 
         --// Bottom Bar \\--
         local BottomClip = New("Frame", {
@@ -11679,7 +12304,44 @@ function Library:CreateWindow(WindowInfo)
         assert(typeof(Size) == "UDim2", "Expected UDim2 for Size got: " .. typeof(Size))
 
         WindowInfo.SearchbarSize = Size
-        SearchBox.Size = Size
+        if not SearchCollapsed then
+            SearchBox.Size = Size
+        end
+    end
+
+    function Window:SetSearchbarCollapsible(Enabled: boolean, CollapsedWidth: number?)
+        WindowInfo.SearchbarCollapsible = Enabled == true
+        if typeof(CollapsedWidth) == "number" then
+            WindowInfo.SearchbarCollapsedWidth = math.max(24, CollapsedWidth)
+        end
+
+        if WindowInfo.SearchbarCollapsible and not SearchBox:IsFocused() and Trim(SearchBox.Text) == "" then
+            SearchCollapsed = not WindowInfo.SearchbarCollapsible
+            SetSearchCollapsed(true)
+        else
+            SetSearchCollapsed(false)
+        end
+    end
+
+    function Window:SetSubPageStyle(NewStyle: { [string]: any })
+        assert(typeof(NewStyle) == "table", "Expected table for SubPageStyle got: " .. typeof(NewStyle))
+
+        for Key, Value in NewStyle do
+            SubPageStyle[Key] = Value
+        end
+        if NewStyle.CornerRadius == false then
+            SubPageStyle.CornerRadius = nil
+        end
+        NormalizeSubPageStyle()
+
+        SubPageList.Padding = UDim.new(0, SubPageStyle.Gap)
+        for _, Tab in Library.Tabs do
+            if typeof(Tab) == "table" and Tab.SubPages then
+                for _, SubPage in Tab.SubPages do
+                    SubPage:ApplyStyle()
+                end
+            end
+        end
     end
 
     function Window:ShowTabInfo(Name, Description)
@@ -11884,6 +12546,7 @@ function Library:CreateWindow(WindowInfo)
         local Tab = {
             Name = Name,
             Description = Description,
+            HighlightLabel = TabLabel,
 
             Tooltip = Tooltip,
             TooltipTable = nil,
@@ -12298,6 +12961,7 @@ function Library:CreateWindow(WindowInfo)
                 local Tab = {
                     Type = "SubTab",
                     Name = Name,
+                    HighlightLabel = ButtonLabel,
 
                     Connections = {},
                     Destroyed = false,
@@ -12684,6 +13348,8 @@ function Library:CreateWindow(WindowInfo)
                 Elements = {}
             }
 
+            Groupbox.HighlightLabel = GroupboxLabel
+
             local ResizeTween
             local CollapseArrowTween
 
@@ -12982,27 +13648,40 @@ function Library:CreateWindow(WindowInfo)
             local SubRight = CreateSide(SubContainer, true)
 
             --// Button (displayed on the left of the search bar) \\--
+            local Style = SubPageStyle
             local ParsedIcon = Library:GetCustomIcon(SubIcon)
+
             local Button = New("TextButton", {
                 BackgroundColor3 = "MainColor",
                 BackgroundTransparency = 1,
                 LayoutOrder = #Tab.SubPages + 1,
-                Size = UDim2.fromOffset(0, 26),
+                Size = UDim2.fromOffset(0, Style.Height),
                 Text = "",
                 Visible = Library.ActiveTab == Tab,
                 Parent = SubPageHolder,
             })
-            table.insert(
-                Library.Corners,
-                New("UICorner", {
-                    CornerRadius = UDim.new(0, Library.CornerRadius / 2),
-                    Parent = Button,
-                })
-            )
+            local ButtonCorner = New("UICorner", {
+                CornerRadius = UDim.new(0, Library.CornerRadius / 2),
+                Parent = Button,
+            })
+            local CornerRegistered = false
             local ButtonStroke = New("UIStroke", {
                 Color = "OutlineColor",
                 Transparency = 1,
                 Parent = Button,
+            })
+            local Indicator = New("Frame", {
+                AnchorPoint = Vector2.new(0.5, 1),
+                BackgroundColor3 = "AccentColor",
+                BackgroundTransparency = 1,
+                Position = UDim2.new(0.5, 0, 1, 0),
+                Size = UDim2.new(1, -8, 0, Style.IndicatorHeight),
+                Visible = false,
+                Parent = Button,
+            })
+            New("UICorner", {
+                CornerRadius = UDim.new(1, 0),
+                Parent = Indicator,
             })
 
             local Content = New("Frame", {
@@ -13010,7 +13689,7 @@ function Library:CreateWindow(WindowInfo)
                 AutomaticSize = Enum.AutomaticSize.X,
                 BackgroundTransparency = 1,
                 Position = UDim2.fromScale(0.5, 0.5),
-                Size = UDim2.fromOffset(0, 16),
+                Size = UDim2.fromOffset(0, Style.TextSize + 2),
                 Parent = Button,
             })
             New("UIListLayout", {
@@ -13027,7 +13706,7 @@ function Library:CreateWindow(WindowInfo)
                     ImageColor3 = ParsedIcon.Custom and "WhiteColor" or "AccentColor",
                     ImageTransparency = 0.5,
                     LayoutOrder = 0,
-                    Size = UDim2.fromOffset(14, 14),
+                    Size = UDim2.fromOffset(Style.TextSize, Style.TextSize),
                     Parent = Content,
                 })
                 Library:ApplyLucideIcon(ButtonIcon, ParsedIcon)
@@ -13037,9 +13716,9 @@ function Library:CreateWindow(WindowInfo)
                 AutomaticSize = Enum.AutomaticSize.X,
                 BackgroundTransparency = 1,
                 LayoutOrder = 1,
-                Size = UDim2.fromOffset(0, 16),
+                Size = UDim2.fromOffset(0, Style.TextSize + 2),
                 Text = SubName,
-                TextSize = 14,
+                TextSize = Style.TextSize,
                 TextTransparency = 0.5,
                 Parent = Content,
             })
@@ -13058,27 +13737,72 @@ function Library:CreateWindow(WindowInfo)
                 Sides = { SubLeft, SubRight },
             }
 
-            local function UpdateButtonWidth()
-                local X = Library:GetTextBounds(ButtonLabel.Text, Library.Scheme.Font, 14)
-                Button.Size = UDim2.fromOffset(X + (ParsedIcon and 20 or 0) + 20, 26)
-            end
-            UpdateButtonWidth()
+            local function ApplyCorner()
+                if Style.CornerRadius ~= nil then
+                    ButtonCorner.CornerRadius = UDim.new(0, Style.CornerRadius)
 
-            local function ApplyVisual(Active: boolean)
-                TweenService:Create(Button, Library.TweenInfo, {
-                    BackgroundTransparency = Active and 0 or 1,
-                }):Play()
-                TweenService:Create(ButtonStroke, Library.TweenInfo, {
-                    Transparency = Active and 0 or 1,
-                }):Play()
-                TweenService:Create(ButtonLabel, Library.TweenInfo, {
-                    TextTransparency = Active and 0 or 0.5,
-                }):Play()
-                if ButtonIcon then
-                    TweenService:Create(ButtonIcon, Library.TweenInfo, {
-                        ImageTransparency = Active and 0 or 0.5,
-                    }):Play()
+                    if CornerRegistered then
+                        local Idx = table.find(Library.Corners, ButtonCorner)
+                        if Idx then
+                            table.remove(Library.Corners, Idx)
+                        end
+                        CornerRegistered = false
+                    end
+                else
+                    ButtonCorner.CornerRadius = UDim.new(0, Library.CornerRadius / 2)
+
+                    if not CornerRegistered then
+                        table.insert(Library.Corners, ButtonCorner)
+                        CornerRegistered = true
+                    end
                 end
+            end
+
+            local function UpdateButtonSize()
+                local X = Library:GetTextBounds(ButtonLabel.Text, Library.Scheme.Font, Style.TextSize)
+                Button.Size = UDim2.fromOffset(
+                    X + (ParsedIcon and (Style.TextSize + 6) or 0) + Style.PaddingX * 2,
+                    Style.Height
+                )
+            end
+
+            local function ApplyVisual(Active: boolean, Instant: boolean?)
+                local IsPill = Style.Style == "pill"
+                local Goals = {
+                    [Button] = { BackgroundTransparency = (IsPill and Active) and 0 or 1 },
+                    [ButtonStroke] = { Transparency = (IsPill and Style.ShowStroke and Active) and 0 or 1 },
+                    [Indicator] = { BackgroundTransparency = Active and 0 or 1 },
+                    [ButtonLabel] = { TextTransparency = Active and 0 or 0.5 },
+                }
+                if ButtonIcon then
+                    Goals[ButtonIcon] = { ImageTransparency = Active and 0 or 0.5 }
+                end
+
+                for Object, Properties in Goals do
+                    if Instant then
+                        for Property, Value in Properties do
+                            Object[Property] = Value
+                        end
+                    else
+                        TweenService:Create(Object, Library.TweenInfo, Properties):Play()
+                    end
+                end
+            end
+
+            function SubPage:ApplyStyle()
+                ButtonLabel.TextSize = Style.TextSize
+                ButtonLabel.Size = UDim2.fromOffset(0, Style.TextSize + 2)
+                Content.Size = UDim2.fromOffset(0, Style.TextSize + 2)
+                if ButtonIcon then
+                    ButtonIcon.Size = UDim2.fromOffset(Style.TextSize, Style.TextSize)
+                end
+
+                Indicator.Size = UDim2.new(1, -8, 0, Style.IndicatorHeight)
+                Indicator.Visible = Style.Style == "underline"
+
+                ApplyCorner()
+                UpdateButtonSize()
+                ApplyVisual(Tab.ActiveSubPage == SubPage, true)
             end
 
             function SubPage:Show()
@@ -13097,20 +13821,22 @@ function Library:CreateWindow(WindowInfo)
                 Tab.Sides = SubPage.Sides
                 Tab:RefreshSides()
 
+                --// Keep the selected button inside the scrolling strip (clear of the overflow arrows) \\--
                 task.defer(function()
                     if SubPage.Destroyed or not Button.Parent or not Button.Visible then
                         return
                     end
 
+                    local Margin = 30
                     local Pos = SubPageHolder.CanvasPosition.X
                     local View = SubPageHolder.AbsoluteSize.X
                     local Left = Button.AbsolutePosition.X - SubPageHolder.AbsolutePosition.X + Pos
                     local Right = Left + Button.AbsoluteSize.X
 
-                    if Left < Pos then
-                        SubPageHolder.CanvasPosition = Vector2.new(Left, 0)
-                    elseif Right > Pos + View then
-                        SubPageHolder.CanvasPosition = Vector2.new(Right - View, 0)
+                    if Left < Pos + Margin then
+                        SubPageHolder.CanvasPosition = Vector2.new(math.max(0, Left - Margin), 0)
+                    elseif Right > Pos + View - Margin then
+                        SubPageHolder.CanvasPosition = Vector2.new(Right - View + Margin, 0)
                     end
                 end)
             end
@@ -13127,7 +13853,7 @@ function Library:CreateWindow(WindowInfo)
             function SubPage:SetText(Text: string)
                 SubPage.Name = Text
                 ButtonLabel.Text = Text
-                UpdateButtonWidth()
+                UpdateButtonSize()
             end
 
             function SubPage:SetVisible(Visible: boolean)
@@ -13191,6 +13917,11 @@ function Library:CreateWindow(WindowInfo)
                     Connection:Disconnect()
                 end
 
+                local CornerIdx = table.find(Library.Corners, ButtonCorner)
+                if CornerIdx then
+                    table.remove(Library.Corners, CornerIdx)
+                end
+
                 local WasActive = Tab.ActiveSubPage == SubPage
                 if WasActive then
                     Tab.ActiveSubPage = nil
@@ -13240,6 +13971,8 @@ function Library:CreateWindow(WindowInfo)
             end
 
             table.insert(Tab.SubPages, SubPage)
+            SubPage:ApplyStyle()
+
             if not Tab.ActiveSubPage then
                 SubPage:Show()
             end
