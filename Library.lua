@@ -436,6 +436,8 @@ local Templates = {
         TabSwipeOffset = 26,
         TabSwipeFrom = "bottom",
         TabButtonsStyle = {
+            Height = 40, -- tab button height
+            TextSize = 16, -- tab button text size
             Gap = 0,
             Padding = 0,
             CornerRadius = 0,
@@ -560,6 +562,9 @@ local Templates = {
         DragSelect = false,
         MaxVisibleDropdownItems = 8,
         KeepDisabledValuePosition = false,
+
+        -- ModalButton = true, (button that opens the values in a popup grid, defaults to true for Multi dropdowns)
+        ModalColumns = 3,
 
         Callback = function() end,
         Changed = function() end,
@@ -8653,6 +8658,12 @@ do
             Type = "Dropdown",
         }
 
+        local ModalEnabled = Info.ModalButton
+        if ModalEnabled == nil then
+            ModalEnabled = Info.Multi == true
+        end
+        local ModalReserve = ModalEnabled and 34 or 0
+
         local Holder = New("Frame", {
             BackgroundTransparency = 1,
             Size = UDim2.new(1, 0, 0, Dropdown.Text and 39 or 21),
@@ -8717,6 +8728,7 @@ do
             Size = UDim2.new(1, 0, 0, 21),
             Text = "---",
             TextSize = 14,
+            TextTruncate = Enum.TextTruncate.AtEnd,
             TextXAlignment = Enum.TextXAlignment.Left,
             ZIndex = 2,
             Parent = DisplayContainer,
@@ -8732,6 +8744,48 @@ do
         })
         if ArrowIcon then
             Library:ApplyLucideIcon(ArrowImage, ArrowIcon)
+        end
+
+        local ModalButton
+        if ModalEnabled then
+            ModalButton = New("ImageButton", {
+                AnchorPoint = Vector2.new(1, 0.5),
+                BackgroundTransparency = 1,
+                ImageColor3 = "FontColor",
+                ImageTransparency = 0.5,
+                Position = UDim2.new(1, -18, 0.5, 0),
+                Size = UDim2.fromOffset(14, 14),
+                ZIndex = 4,
+                Parent = DisplayContainer,
+            })
+
+            local GridIcon = Library:GetIcon("layout-grid")
+            if GridIcon then
+                Library:ApplyLucideIcon(ModalButton, GridIcon)
+            else
+                New("TextLabel", {
+                    BackgroundTransparency = 1,
+                    Size = UDim2.fromScale(1, 1),
+                    Text = "::",
+                    TextSize = 14,
+                    ZIndex = 5,
+                    Parent = ModalButton,
+                })
+            end
+
+            table.insert(Dropdown.Connections, ModalButton.MouseEnter:Connect(function()
+                if not Dropdown.Disabled then
+                    TweenService:Create(ModalButton, Library.TweenInfo, { ImageTransparency = 0 }):Play()
+                end
+            end))
+            table.insert(Dropdown.Connections, ModalButton.MouseLeave:Connect(function()
+                if not Dropdown.Disabled then
+                    TweenService:Create(ModalButton, Library.TweenInfo, { ImageTransparency = 0.5 }):Play()
+                end
+            end))
+            table.insert(Dropdown.Connections, ModalButton.MouseButton1Click:Connect(function()
+                Dropdown:OpenModal()
+            end))
         end
 
         local SearchBox
@@ -8865,6 +8919,9 @@ do
             DisplayButton.TextTransparency = Dropdown.Disabled and 0.8 or 0
             DisplayImage.ImageTransparency = Dropdown.Disabled and 0.8 or 0
             ArrowImage.ImageTransparency = Dropdown.Disabled and 0.8 or MenuTable.Active and 0 or 0.5
+            if ModalButton then
+                ModalButton.ImageTransparency = Dropdown.Disabled and 0.8 or 0.5
+            end
         end
 
         function Dropdown:Display()
@@ -8918,8 +8975,12 @@ do
                 DisplayImage.ImageTransparency = 1
             end
 
-            DisplayButton.Size = ValueImage and UDim2.new(1, -8, 0, 21) or UDim2.new(1, 0, 0, 21)
+            DisplayButton.Size = ValueImage and UDim2.new(1, -8 - ModalReserve, 0, 21) or UDim2.new(1, -ModalReserve, 0, 21)
             DisplayButton.Position = ValueImage and UDim2.fromOffset(14, 0) or UDim2.fromOffset(0, 0)
+
+            if Dropdown.ModalRefresh then
+                Dropdown.ModalRefresh()
+            end
         end
 
         function Dropdown:OnChanged(Func)
@@ -9409,6 +9470,10 @@ do
 
             Dropdown:RefreshPool()
             Dropdown:RecalculateListSize(#FilteredEntries)
+
+            if Dropdown.ModalRebuild then
+                Dropdown.ModalRebuild()
+            end
         end
 
         for _ = 1, PoolSize do
@@ -9580,6 +9645,9 @@ do
             end
 
             MenuTable:Close()
+            if Disabled then
+                Dropdown:CloseModal()
+            end
             DisplayButton.Active = not Dropdown.Disabled
             Dropdown:UpdateColors()
 
@@ -9608,6 +9676,342 @@ do
 
             Dropdown.DragSelect = Value == true
             Dropdown:BuildDropdownList()
+        end
+
+        --// Modal popup: every value as a grid cell, with select all / deselect all / invert \\--
+        function Dropdown:CloseModal()
+            local Modal = Dropdown.Modal
+            if Modal and not Modal.Destroyed then
+                Modal:Dismiss()
+            end
+
+            Dropdown.Modal = nil
+            Dropdown.ModalRefresh = nil
+            Dropdown.ModalRebuild = nil
+        end
+
+        function Dropdown:OpenModal()
+            if Dropdown.Disabled or Dropdown.Destroyed then
+                return
+            end
+
+            local Window = Library.Window
+            if not (Window and Window.AddDialog) or Library.ActiveDialog then
+                return
+            end
+
+            MenuTable:Close()
+
+            local Columns = math.max(1, math.floor(tonumber(Info.ModalColumns) or 3))
+            local CellHeight, CellGap = 26, 6
+
+            local Dialog
+            local GridScroll
+            local Cells = {}
+            local Query = ""
+
+            local function GetEntries()
+                local Entries = {}
+                local Values = Dropdown.Values
+                local IsDictionary = not IsSequentialArray(Values)
+
+                for Key, RawValue in Values do
+                    local Value = IsDictionary and Key or RawValue
+                    local Text = tostring(Info.FormatListValue and Info.FormatListValue(RawValue) or RawValue)
+
+                    if Query ~= "" then
+                        local Matched = FuzzyScore(StripRichText(Text):lower(), Query)
+                        if not Matched then
+                            continue
+                        end
+                    end
+
+                    local IsDisabled = table.find(Dropdown.DisabledValues, Value) ~= nil
+                        or (RawValue ~= nil and RawValue ~= Value and table.find(Dropdown.DisabledValues, RawValue) ~= nil)
+
+                    table.insert(Entries, { Key = Key, Value = Value, Text = Text, Disabled = IsDisabled })
+                end
+
+                if IsDictionary then
+                    table.sort(Entries, function(A, B)
+                        return StripRichText(A.Text):lower() < StripRichText(B.Text):lower()
+                    end)
+                else
+                    table.sort(Entries, function(A, B)
+                        return A.Key < B.Key
+                    end)
+                end
+
+                return Entries
+            end
+
+            local function IsSelected(Value)
+                if Info.Multi then
+                    return Dropdown.Value[Value] == true
+                end
+
+                return Dropdown.Value == Value
+            end
+
+            local function UpdateDescription()
+                if not Dialog or Dialog.Destroyed then
+                    return
+                end
+
+                if Info.Multi then
+                    Dialog:SetDescription(string.format("%d / %d selected", Dropdown:GetActiveValues(true), GetTableSize(Dropdown.Values)))
+                end
+            end
+
+            local function UpdateCell(Cell)
+                local Selected = IsSelected(Cell.Entry.Value)
+
+                Cell.Label.TextTransparency = Cell.Entry.Disabled and 0.8 or (Selected and 0 or 0.5)
+                Cell.Button.BackgroundTransparency = Selected and 0.75 or 0
+
+                local ButtonRegistry = Library.Registry[Cell.Button]
+                if ButtonRegistry then
+                    ButtonRegistry.BackgroundColor3 = Selected and "AccentColor" or "MainColor"
+                end
+                Cell.Button.BackgroundColor3 = Selected and Library.Scheme.AccentColor or Library.Scheme.MainColor
+
+                local StrokeRegistry = Library.Registry[Cell.Stroke]
+                if StrokeRegistry then
+                    StrokeRegistry.Color = Selected and "AccentColor" or "OutlineColor"
+                end
+                Cell.Stroke.Color = Selected and Library.Scheme.AccentColor or Library.Scheme.OutlineColor
+            end
+
+            local function Commit()
+                Dropdown:Display() --// refreshes the cells through ModalRefresh
+                for _, Row in Pool do
+                    Row:UpdateButton()
+                end
+
+                Library:UpdateDependencyBoxes()
+                Dropdown:RunChanged()
+            end
+
+            local function ToggleEntry(Entry)
+                if Entry.Disabled then
+                    return
+                end
+
+                if Info.Multi then
+                    local Selected = Dropdown.Value[Entry.Value]
+                    if Selected and Dropdown:GetActiveValues(true) == 1 and not Info.AllowNull then
+                        return
+                    end
+
+                    Dropdown.Value[Entry.Value] = (not Selected) and true or nil
+                    Commit()
+                    return
+                end
+
+                if Dropdown.Value == Entry.Value then
+                    if Info.AllowNull then
+                        Dropdown.Value = nil
+                        Commit()
+                    end
+                else
+                    Dropdown.Value = Entry.Value
+                    Commit()
+                end
+
+                Dialog:Dismiss()
+            end
+
+            --// Applies to the values currently shown (so it respects the search box) and never touches disabled values \\--
+            local function Bulk(Mode: string)
+                if Info.Multi then
+                    local Before = table.clone(Dropdown.Value)
+
+                    for _, Entry in GetEntries() do
+                        if Entry.Disabled then
+                            continue
+                        end
+
+                        if Mode == "all" then
+                            Dropdown.Value[Entry.Value] = true
+                        elseif Mode == "none" then
+                            Dropdown.Value[Entry.Value] = nil
+                        elseif Mode == "invert" then
+                            Dropdown.Value[Entry.Value] = (not Dropdown.Value[Entry.Value]) and true or nil
+                        end
+                    end
+
+                    if not Info.AllowNull and GetTableSize(Dropdown.Value) == 0 then
+                        local Keep = Mode == "none" and next(Before) or nil
+                        Dropdown.Value = Keep ~= nil and { [Keep] = true } or Before
+                    end
+                elseif Mode == "none" and Info.AllowNull then
+                    Dropdown.Value = nil
+                end
+
+                Commit()
+            end
+
+            local function Rebuild()
+                for _, Cell in Cells do
+                    Cell.Button:Destroy()
+                end
+                table.clear(Cells)
+
+                for Index, Entry in GetEntries() do
+                    local Button = New("TextButton", {
+                        BackgroundColor3 = "MainColor",
+                        LayoutOrder = Index,
+                        Text = "",
+                        Parent = GridScroll,
+                    })
+                    New("UICorner", {
+                        CornerRadius = UDim.new(0, Library.CornerRadius / 2),
+                        Parent = Button,
+                    })
+                    local Stroke = New("UIStroke", {
+                        Color = "OutlineColor",
+                        Parent = Button,
+                    })
+
+                    local Label = New("TextLabel", {
+                        BackgroundTransparency = 1,
+                        Size = UDim2.fromScale(1, 1),
+                        Text = Entry.Text,
+                        TextSize = 14,
+                        TextTruncate = Enum.TextTruncate.AtEnd,
+                        Parent = Button,
+                    })
+                    New("UIPadding", {
+                        PaddingLeft = UDim.new(0, 6),
+                        PaddingRight = UDim.new(0, 6),
+                        Parent = Label,
+                    })
+
+                    local Cell = { Button = Button, Label = Label, Stroke = Stroke, Entry = Entry }
+                    Button.MouseButton1Click:Connect(function()
+                        ToggleEntry(Entry)
+                    end)
+
+                    table.insert(Cells, Cell)
+                    UpdateCell(Cell)
+                end
+            end
+
+            --// Dialog \\--
+            local Footer = {}
+            if Info.Multi then
+                table.insert(Footer, { Id = "SelectAll", Title = "Select all", Variant = "Secondary", Order = 1, Callback = function() Bulk("all") end })
+                table.insert(Footer, { Id = "DeselectAll", Title = "Deselect all", Variant = "Secondary", Order = 2, Callback = function() Bulk("none") end })
+                table.insert(Footer, { Id = "Invert", Title = "Invert", Variant = "Secondary", Order = 3, Callback = function() Bulk("invert") end })
+            elseif Info.AllowNull then
+                table.insert(Footer, { Id = "Clear", Title = "Clear", Variant = "Secondary", Order = 1, Callback = function() Bulk("none") end })
+            end
+            table.insert(Footer, {
+                Id = "Done",
+                Title = "Done",
+                Variant = "Primary",
+                Order = 10,
+                Callback = function(Dlg)
+                    Dlg:Dismiss()
+                end,
+            })
+
+            Dialog = Window:AddDialog("DropdownModal_" .. tostring(Idx), {
+                Title = Dropdown.Text or "Select",
+                Description = Info.Multi and "Select one or more values" or "Select a value",
+                AutoDismiss = false,
+                OutsideClickDismiss = true,
+                FooterButtons = Footer,
+            })
+            Dropdown.Modal = Dialog
+
+            local TotalValues = GetTableSize(Dropdown.Values)
+            if Info.Searchable or TotalValues > 12 then
+                local SearchInput = New("TextBox", {
+                    BackgroundColor3 = "MainColor",
+                    ClearTextOnFocus = false,
+                    LayoutOrder = 1,
+                    PlaceholderText = "Search...",
+                    Size = UDim2.new(1, 0, 0, 22),
+                    TextSize = 14,
+                    TextXAlignment = Enum.TextXAlignment.Left,
+                    Parent = Dialog.Container,
+                })
+                New("UIPadding", {
+                    PaddingLeft = UDim.new(0, 8),
+                    PaddingRight = UDim.new(0, 8),
+                    Parent = SearchInput,
+                })
+                New("UICorner", {
+                    CornerRadius = UDim.new(0, Library.CornerRadius / 2),
+                    Parent = SearchInput,
+                })
+                New("UIStroke", {
+                    Color = "OutlineColor",
+                    Parent = SearchInput,
+                })
+
+                SearchInput:GetPropertyChangedSignal("Text"):Connect(function()
+                    Query = NormalizeSearch(SearchInput.Text:lower())
+                    Rebuild()
+                end)
+            end
+
+            local Rows = math.max(1, math.ceil(TotalValues / Columns))
+            local GridHeight = math.clamp(
+                Rows * CellHeight + (Rows - 1) * CellGap + 4,
+                CellHeight + 4,
+                8 * CellHeight + 7 * CellGap + 4
+            )
+
+            GridScroll = New("ScrollingFrame", {
+                AutomaticCanvasSize = Enum.AutomaticSize.Y,
+                BackgroundTransparency = 1,
+                CanvasSize = UDim2.fromOffset(0, 0),
+                LayoutOrder = 2,
+                ScrollBarImageColor3 = "OutlineColor",
+                ScrollBarThickness = 3,
+                ScrollingDirection = Enum.ScrollingDirection.Y,
+                Size = UDim2.new(1, 0, 0, GridHeight),
+                Parent = Dialog.Container,
+            })
+            New("UIGridLayout", {
+                CellPadding = UDim2.fromOffset(CellGap, CellGap),
+                CellSize = UDim2.new(1 / Columns, -math.ceil(CellGap * (Columns - 1) / Columns) - 1, 0, CellHeight),
+                SortOrder = Enum.SortOrder.LayoutOrder,
+                Parent = GridScroll,
+            })
+            New("UIPadding", {
+                PaddingBottom = UDim.new(0, 2),
+                PaddingRight = UDim.new(0, 6),
+                PaddingTop = UDim.new(0, 2),
+                Parent = GridScroll,
+            })
+
+            Dropdown.ModalRefresh = function()
+                if Dialog.Destroyed then
+                    Dropdown.Modal, Dropdown.ModalRefresh, Dropdown.ModalRebuild = nil, nil, nil
+                    return
+                end
+
+                for _, Cell in Cells do
+                    UpdateCell(Cell)
+                end
+                UpdateDescription()
+            end
+            Dropdown.ModalRebuild = function()
+                if Dialog.Destroyed then
+                    Dropdown.Modal, Dropdown.ModalRefresh, Dropdown.ModalRebuild = nil, nil, nil
+                    return
+                end
+
+                Rebuild()
+                UpdateDescription()
+            end
+
+            Dialog:Resize()
+            Rebuild()
+            UpdateDescription()
         end
 
         local ToggleDropdown = function()
@@ -9700,6 +10104,7 @@ do
         function Dropdown:Destroy()
             Dropdown.Destroyed = true
 
+            Dropdown:CloseModal()
             StopDragSelect()
 
             if Dropdown.Connections then
@@ -11389,6 +11794,15 @@ function Library:CreateWindow(WindowInfo)
     end
     NormalizeSubPageStyle()
 
+    local function NormalizeTabButtonsStyle()
+        TabButtonsStyle.Height = math.max(24, tonumber(TabButtonsStyle.Height) or 40)
+        TabButtonsStyle.TextSize = math.max(8, tonumber(TabButtonsStyle.TextSize) or 16)
+        TabButtonsStyle.Gap = math.max(0, tonumber(TabButtonsStyle.Gap) or 0)
+        TabButtonsStyle.Padding = math.max(0, tonumber(TabButtonsStyle.Padding) or 0)
+        TabButtonsStyle.CornerRadius = math.max(0, tonumber(TabButtonsStyle.CornerRadius) or 0)
+    end
+    NormalizeTabButtonsStyle()
+
     --// Old Naming \\--
     if WindowInfo.Compact ~= nil then
         WindowInfo.SidebarCompacted = WindowInfo.Compact
@@ -11430,6 +11844,7 @@ function Library:CreateWindow(WindowInfo)
     local SubPageList
     local SearchCollapsed = false
     local SetSearchCollapsed
+    local TabsLayout, TabsPadding
     local CurrentTabInfo
     local CurrentTabLabel
     local CurrentTabDescription
@@ -11452,6 +11867,62 @@ function Library:CreateWindow(WindowInfo)
     local InitialLeftWidth = math.ceil(WindowInfo.Size.X.Offset * 0.3)
     local IsCompact = WindowInfo.SidebarCompacted
     local LastExpandedWidth = InitialLeftWidth
+
+    --// Tab button metrics (height / text size are configurable through TabButtonsStyle) \\--
+    local function GetTabMetrics(Compact: boolean)
+        local Height = TabButtonsStyle.Height
+        local PadV = math.floor(Height * (Compact and 0.15 or 0.275) + 0.5)
+        local PadH = Compact and 6 or 12
+
+        return PadV, PadH, math.max(8, Height - PadV * 2) + 12
+    end
+
+    local function ApplyTabEntry(Entry)
+        local Compact = IsCompact and Entry.Icon ~= nil
+        local PadV, PadH, LabelOffset = GetTabMetrics(Compact)
+
+        if Entry.Button then
+            Entry.Button.Size = UDim2.new(1, 0, 0, TabButtonsStyle.Height)
+        end
+        if Entry.Corner then
+            Entry.Corner.CornerRadius = UDim.new(0, TabButtonsStyle.CornerRadius)
+        end
+
+        Entry.Padding.PaddingBottom = UDim.new(0, PadV)
+        Entry.Padding.PaddingTop = UDim.new(0, PadV)
+        Entry.Padding.PaddingLeft = UDim.new(0, PadH)
+        Entry.Padding.PaddingRight = UDim.new(0, PadH)
+
+        Entry.Label.TextSize = TabButtonsStyle.TextSize
+        Entry.Label.Position = UDim2.fromOffset(LabelOffset, 0)
+        Entry.Label.Size = UDim2.new(1, -LabelOffset, 1, 0)
+
+        if Entry.Icon then
+            Entry.Label.Visible = not IsCompact
+            Entry.Icon.SizeConstraint = IsCompact and Enum.SizeConstraint.RelativeXY or Enum.SizeConstraint.RelativeYY
+        end
+
+        if Entry.Indicator then
+            Entry.Indicator.Size = UDim2.fromOffset(TabButtonsStyle.IndicatorWidth, TabButtonsStyle.IndicatorHeight)
+        end
+    end
+
+    local function ApplyTabButtonsStyle()
+        TabsLayout.Padding = UDim.new(0, TabButtonsStyle.Gap)
+
+        local Pad = UDim.new(0, TabButtonsStyle.Padding)
+        TabsPadding.PaddingBottom = Pad
+        TabsPadding.PaddingLeft = Pad
+        TabsPadding.PaddingRight = Pad
+        TabsPadding.PaddingTop = Pad
+
+        for _, Entry in Library.TabButtons do
+            ApplyTabEntry(Entry)
+        end
+
+        WindowInfo.MinSidebarWidth = math.max(WindowInfo.MinSidebarWidth, 64 + TabButtonsStyle.Padding * 2)
+        WindowInfo.SidebarCompactWidth = math.max(WindowInfo.SidebarCompactWidth, 40 + TabButtonsStyle.Padding * 2)
+    end
 
     do
         Library.KeybindFrame, Library.KeybindContainer = Library:AddDraggableMenu("Keybinds")
@@ -11985,11 +12456,11 @@ function Library:CreateWindow(WindowInfo)
             Size = UDim2.new(0, InitialLeftWidth, 1, -70),
             Parent = MainFrame,
         })
-        New("UIListLayout", {
+        TabsLayout = New("UIListLayout", {
             Padding = UDim.new(0, TabButtonsStyle.Gap),
             Parent = Tabs,
         })
-        New("UIPadding", {
+        TabsPadding = New("UIPadding", {
             PaddingBottom = UDim.new(0, TabButtonsStyle.Padding),
             PaddingLeft = UDim.new(0, TabButtonsStyle.Padding),
             PaddingRight = UDim.new(0, TabButtonsStyle.Padding),
@@ -12256,17 +12727,8 @@ function Library:CreateWindow(WindowInfo)
             WindowIcon.Visible = IsCompact
         end
 
-        for _, Button in Library.TabButtons do
-            if not Button.Icon then
-                continue
-            end
-
-            Button.Label.Visible = not IsCompact
-            Button.Padding.PaddingBottom = UDim.new(0, IsCompact and 6 or 11)
-            Button.Padding.PaddingLeft = UDim.new(0, IsCompact and 6 or 12)
-            Button.Padding.PaddingRight = UDim.new(0, IsCompact and 6 or 12)
-            Button.Padding.PaddingTop = UDim.new(0, IsCompact and 6 or 11)
-            Button.Icon.SizeConstraint = IsCompact and Enum.SizeConstraint.RelativeXY or Enum.SizeConstraint.RelativeYY
+        for _, Entry in Library.TabButtons do
+            ApplyTabEntry(Entry)
         end
     end
 
@@ -12321,6 +12783,23 @@ function Library:CreateWindow(WindowInfo)
         else
             SetSearchCollapsed(false)
         end
+    end
+
+    function Window:SetTabButtonsStyle(NewStyle: { [string]: any })
+        assert(typeof(NewStyle) == "table", "Expected table for TabButtonsStyle got: " .. typeof(NewStyle))
+
+        for Key, Value in NewStyle do
+            TabButtonsStyle[Key] = Value
+        end
+        NormalizeTabButtonsStyle()
+        ApplyTabButtonsStyle()
+    end
+
+    --// Changes the height (and optionally the text size) of every tab button \--
+    function Window:SetTabSize(Height: number, TextSize: number?)
+        assert(typeof(Height) == "number", "Expected number for Height got: " .. typeof(Height))
+
+        Window:SetTabButtonsStyle({ Height = Height, TextSize = TextSize or TabButtonsStyle.TextSize })
     end
 
     function Window:SetSubPageStyle(NewStyle: { [string]: any })
@@ -12396,12 +12875,12 @@ function Library:CreateWindow(WindowInfo)
             TabButton = New("TextButton", {
                 BackgroundColor3 = "MainColor",
                 BackgroundTransparency = 1,
-                Size = UDim2.new(1, 0, 0, 40),
+                Size = UDim2.new(1, 0, 0, TabButtonsStyle.Height),
                 Text = "",
                 LayoutOrder = Order,
                 Parent = Tabs,
             })
-            New("UICorner", {
+            local TabButtonCorner = New("UICorner", {
                 CornerRadius = UDim.new(0, TabButtonsStyle.CornerRadius),
                 Parent = TabButton,
             })
@@ -12427,19 +12906,20 @@ function Library:CreateWindow(WindowInfo)
                 Size = UDim2.fromScale(1, 1),
                 Parent = TabButton,
             })
+            local TabPadV, TabPadH, TabLabelOffset = GetTabMetrics(IsCompact)
             local ButtonPadding = New("UIPadding", {
-                PaddingBottom = UDim.new(0, IsCompact and 6 or 11),
-                PaddingLeft = UDim.new(0, IsCompact and 6 or 12),
-                PaddingRight = UDim.new(0, IsCompact and 6 or 12),
-                PaddingTop = UDim.new(0, IsCompact and 6 or 11),
+                PaddingBottom = UDim.new(0, TabPadV),
+                PaddingLeft = UDim.new(0, TabPadH),
+                PaddingRight = UDim.new(0, TabPadH),
+                PaddingTop = UDim.new(0, TabPadV),
                 Parent = ButtonHolder,
             })
             TabLabel = New("TextLabel", {
                 BackgroundTransparency = 1,
-                Position = UDim2.fromOffset(30, 0),
-                Size = UDim2.new(1, -30, 1, 0),
+                Position = UDim2.fromOffset(TabLabelOffset, 0),
+                Size = UDim2.new(1, -TabLabelOffset, 1, 0),
                 Text = Name,
-                TextSize = 16,
+                TextSize = TabButtonsStyle.TextSize,
                 TextTransparency = 0.5,
                 TextXAlignment = Enum.TextXAlignment.Left,
                 Visible = not IsCompact,
@@ -12459,6 +12939,9 @@ function Library:CreateWindow(WindowInfo)
             end
 
             table.insert(Library.TabButtons, {
+                Button = TabButton,
+                Corner = TabButtonCorner,
+                Indicator = TabIndicator,
                 Label = TabLabel,
                 Padding = ButtonPadding,
                 Icon = TabIcon,
@@ -14214,12 +14697,12 @@ function Library:CreateWindow(WindowInfo)
             TabButton = New("TextButton", {
                 BackgroundColor3 = "MainColor",
                 BackgroundTransparency = 1,
-                Size = UDim2.new(1, 0, 0, 40),
+                Size = UDim2.new(1, 0, 0, TabButtonsStyle.Height),
                 Text = "",
                 LayoutOrder = Order,
                 Parent = Tabs,
             })
-            New("UICorner", {
+            local TabButtonCorner = New("UICorner", {
                 CornerRadius = UDim.new(0, TabButtonsStyle.CornerRadius),
                 Parent = TabButton,
             })
@@ -14245,20 +14728,21 @@ function Library:CreateWindow(WindowInfo)
                 Size = UDim2.fromScale(1, 1),
                 Parent = TabButton,
             })
+            local TabPadV, TabPadH, TabLabelOffset = GetTabMetrics(IsCompact)
             local ButtonPadding = New("UIPadding", {
-                PaddingBottom = UDim.new(0, IsCompact and 6 or 11),
-                PaddingLeft = UDim.new(0, IsCompact and 6 or 12),
-                PaddingRight = UDim.new(0, IsCompact and 6 or 12),
-                PaddingTop = UDim.new(0, IsCompact and 6 or 11),
+                PaddingBottom = UDim.new(0, TabPadV),
+                PaddingLeft = UDim.new(0, TabPadH),
+                PaddingRight = UDim.new(0, TabPadH),
+                PaddingTop = UDim.new(0, TabPadV),
                 Parent = ButtonHolder,
             })
 
             TabLabel = New("TextLabel", {
                 BackgroundTransparency = 1,
-                Position = UDim2.fromOffset(30, 0),
-                Size = UDim2.new(1, -30, 1, 0),
+                Position = UDim2.fromOffset(TabLabelOffset, 0),
+                Size = UDim2.new(1, -TabLabelOffset, 1, 0),
                 Text = Name,
-                TextSize = 16,
+                TextSize = TabButtonsStyle.TextSize,
                 TextTransparency = 0.5,
                 TextXAlignment = Enum.TextXAlignment.Left,
                 Visible = not IsCompact,
@@ -14278,6 +14762,9 @@ function Library:CreateWindow(WindowInfo)
             end
 
             table.insert(Library.TabButtons, {
+                Button = TabButton,
+                Corner = TabButtonCorner,
+                Indicator = TabIndicator,
                 Label = TabLabel,
                 Padding = ButtonPadding,
                 Icon = TabIcon,
