@@ -11165,21 +11165,41 @@ function Library:CreateWindow(WindowInfo)
         })
 
         --// Sub Pages (shown on the left of the search bar) \\--
-        SubPageHolder = New("Frame", {
-            AutomaticSize = Enum.AutomaticSize.X,
+        --// Fills all the free space on the left of the search bar (more room when the tab has no description) and scrolls horizontally on overflow \\--
+        SubPageHolder = New("ScrollingFrame", {
+            AutomaticCanvasSize = Enum.AutomaticSize.None,
             BackgroundTransparency = 1,
-            ClipsDescendants = true,
+            CanvasSize = UDim2.fromOffset(0, 0),
             LayoutOrder = 1,
+            ScrollBarImageColor3 = "OutlineColor",
+            ScrollBarThickness = 2,
+            ScrollingDirection = Enum.ScrollingDirection.X,
             Size = UDim2.new(0, 0, 1, 0),
+            VerticalScrollBarInset = Enum.ScrollBarInset.None,
             Parent = RightWrapper,
         })
-        New("UIListLayout", {
+        New("UIFlexItem", {
+            FlexMode = Enum.UIFlexMode.Grow,
+            Parent = SubPageHolder,
+        })
+        local SubPageList = New("UIListLayout", {
             FillDirection = Enum.FillDirection.Horizontal,
             HorizontalAlignment = Enum.HorizontalAlignment.Right,
             VerticalAlignment = Enum.VerticalAlignment.Center,
             Padding = UDim.new(0, 4),
             Parent = SubPageHolder,
         })
+
+        local function UpdateSubPageCanvas()
+            local Scale = Library.DPIScale
+            local ContentX = SubPageList.AbsoluteContentSize.X / Scale
+            local ViewX = SubPageHolder.AbsoluteSize.X / Scale
+
+            --// Canvas is never smaller than the view so the buttons stay right-aligned (next to the search bar) \\--
+            SubPageHolder.CanvasSize = UDim2.fromOffset(math.max(ContentX, ViewX), 0)
+        end
+        Library:GiveSignal(SubPageList:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(UpdateSubPageCanvas))
+        Library:GiveSignal(SubPageHolder:GetPropertyChangedSignal("AbsoluteSize"):Connect(UpdateSubPageCanvas))
 
         SearchBox = New("TextBox", {
             BackgroundColor3 = "MainColor",
@@ -13068,6 +13088,23 @@ function Library:CreateWindow(WindowInfo)
                 Tab.ActiveSubPage = SubPage
                 Tab.Sides = SubPage.Sides
                 Tab:RefreshSides()
+
+                task.defer(function()
+                    if SubPage.Destroyed or not Button.Parent or not Button.Visible then
+                        return
+                    end
+
+                    local Pos = SubPageHolder.CanvasPosition.X
+                    local View = SubPageHolder.AbsoluteSize.X
+                    local Left = Button.AbsolutePosition.X - SubPageHolder.AbsolutePosition.X + Pos
+                    local Right = Left + Button.AbsoluteSize.X
+
+                    if Left < Pos then
+                        SubPageHolder.CanvasPosition = Vector2.new(Left, 0)
+                    elseif Right > Pos + View then
+                        SubPageHolder.CanvasPosition = Vector2.new(Right - View, 0)
+                    end
+                end)
             end
 
             function SubPage:Hide()
