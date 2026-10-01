@@ -10923,6 +10923,7 @@ function Library:CreateWindow(WindowInfo)
     local RightWrapper
     local SearchBox
     local SubPageHolder
+    local SubPageList
     local CurrentTabInfo
     local CurrentTabLabel
     local CurrentTabDescription
@@ -11182,17 +11183,22 @@ function Library:CreateWindow(WindowInfo)
             FlexMode = Enum.UIFlexMode.Grow,
             Parent = SubPageHolder,
         })
-        local SubPageList = New("UIListLayout", {
+        SubPageList = New("UIListLayout", {
             FillDirection = Enum.FillDirection.Horizontal,
-            HorizontalAlignment = Enum.HorizontalAlignment.Right,
+            HorizontalAlignment = Enum.HorizontalAlignment.Left, --// Switches to Right while a tab description is shown \\--
             VerticalAlignment = Enum.VerticalAlignment.Center,
             Padding = UDim.new(0, 4),
+            Parent = SubPageHolder,
+        })
+        New("UIPadding", {
+            PaddingLeft = UDim.new(0, 8),
+            PaddingRight = UDim.new(0, 8),
             Parent = SubPageHolder,
         })
 
         local function UpdateSubPageCanvas()
             local Scale = Library.DPIScale
-            local ContentX = SubPageList.AbsoluteContentSize.X / Scale
+            local ContentX = SubPageList.AbsoluteContentSize.X / Scale + 16 --// + side padding
             local ViewX = SubPageHolder.AbsoluteSize.X / Scale
 
             --// Canvas is never smaller than the view so the buttons stay right-aligned (next to the search bar) \\--
@@ -11681,10 +11687,12 @@ function Library:CreateWindow(WindowInfo)
         CurrentTabDescription.Text = Description
 
         CurrentTabInfo.Visible = true
+        SubPageList.HorizontalAlignment = Enum.HorizontalAlignment.Right
     end
 
     function Window:HideTabInfo()
         CurrentTabInfo.Visible = false
+        SubPageList.HorizontalAlignment = Enum.HorizontalAlignment.Left
     end
 
     function Window:AddTab(...)
