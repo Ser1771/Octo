@@ -10,6 +10,9 @@ local UserInputService: UserInputService = cloneref(game:GetService("UserInputSe
 local TextService: TextService = cloneref(game:GetService("TextService"))
 local Teams: Teams = cloneref(game:GetService("Teams"))
 local TweenService: TweenService = cloneref(game:GetService("TweenService"))
+local HttpService: HttpService = cloneref(game:GetService("HttpService"))
+local MarketplaceService: MarketplaceService = cloneref(game:GetService("MarketplaceService"))
+local Stats = cloneref(game:GetService("Stats"))
 
 local getgenv = getgenv or function()
     return shared
@@ -407,6 +410,9 @@ local Templates = {
         NotifySide = "Right",
         ShowCustomCursor = true,
 
+        Toolbar = true, -- top center controller (true | false | { Offset, ButtonSize, IconSize, Draggable, Visible, DefaultButtons })
+        Watermark = false, -- true | { Title, Icon, ShowFPS, ShowPing, ShowPlayer, ShowGame, ShowTime, Segments, ... }
+
         Font = Enum.Font.Code,
         ToggleKeybind = Enum.KeyCode.RightControl,
 
@@ -561,6 +567,55 @@ local Templates = {
         Visible = true,
 
         AllowRightClickInput = true
+    },
+    Card = {
+        Title = "Card",
+        Description = nil,
+        Footer = nil,
+        Tag = nil, -- small pill on the top right
+
+        Icon = nil,
+        Image = nil, -- background image
+        ImageTransparency = 0.5,
+        ImageScaleType = Enum.ScaleType.Crop,
+
+        BackgroundColor = nil, -- Color3 or scheme key ("MainColor")
+        BackgroundTransparency = 0,
+        CornerRadius = nil,
+        Height = 0, -- minimum height
+
+        Buttons = {}, -- { { Text = "Open", Variant = "Primary", Callback = function(Card) end } }
+        Callback = nil, -- makes the whole card clickable
+
+        TitleSize = 16,
+        DescriptionSize = 14,
+        Visible = true,
+    },
+    Toolbar = {
+        Offset = 6,
+        ButtonSize = 30,
+        IconSize = 18,
+        Draggable = true,
+        Visible = true,
+        DefaultButtons = true,
+    },
+    Watermark = {
+        Title = "Octo",
+        Icon = "chart-column",
+
+        ShowGame = false,
+        ShowPlayer = false,
+        ShowFPS = true,
+        ShowPing = true,
+        ShowTime = false,
+
+        Segments = {}, -- extra segments: { Text or function }
+        Separator = "·",
+
+        Position = nil, -- UDim2 (anchored top right by default)
+        Draggable = true,
+        Visible = true,
+        Interval = 0.25,
     },
     RangeSlider = {
         Text = "Range",
@@ -7111,17 +7166,20 @@ do
     local Funcs = {}
 
     function Funcs:AddDivider(...)
-        if self.Destroyed then return nil end
+        if self.Destroyed then
+            return nil
+        end
 
         local Params = select(1, ...)
         local Text
-        local MarginTop = 0
-        local MarginBottom = 0
+        local MarginTop, MarginBottom = 0, 0
+        local Thickness = 1
 
         if typeof(Params) == "table" then
             Text = Params.Text
             MarginTop = Params.MarginTop or Params.Margin or 0
             MarginBottom = Params.MarginBottom or Params.Margin or 0
+            Thickness = math.max(1, tonumber(Params.Thickness) or 1)
         elseif typeof(Params) == "string" then
             Text = Params
         end
@@ -7131,65 +7189,67 @@ do
 
         local Holder = New("Frame", {
             BackgroundTransparency = 1,
-            Size = UDim2.new(1, 0, 0, 6 + MarginTop + MarginBottom),
+            Size = UDim2.new(1, 0, 0, (Text and 16 or 8) + MarginTop + MarginBottom),
             Parent = Container,
         })
-
-        local InnerHolder = New("Frame", {
-            BackgroundTransparency = 1,
-            Size = UDim2.new(1, 0, 1, 0),
-            Parent = Holder,
-        })
-
         New("UIPadding", {
-            PaddingTop = UDim.new(0, MarginTop),
             PaddingBottom = UDim.new(0, MarginBottom),
+            PaddingTop = UDim.new(0, MarginTop),
             Parent = Holder,
         })
+
+        local Inner = New("Frame", {
+            BackgroundTransparency = 1,
+            Size = UDim2.fromScale(1, 1),
+            Parent = Holder,
+        })
+        New("UIListLayout", {
+            FillDirection = Enum.FillDirection.Horizontal,
+            VerticalAlignment = Enum.VerticalAlignment.Center,
+            Padding = UDim.new(0, 8),
+            Parent = Inner,
+        })
+
+        --// Lines fade out towards the edges (and towards the text) instead of a flat 2px bar \\--
+        local function CreateLine(Order: number, Points)
+            local Line = New("Frame", {
+                BackgroundColor3 = "OutlineColor",
+                LayoutOrder = Order,
+                Size = UDim2.new(0, 0, 0, Thickness),
+                Parent = Inner,
+            })
+            New("UIFlexItem", {
+                FlexMode = Enum.UIFlexMode.Grow,
+                Parent = Line,
+            })
+
+            local Keypoints = {}
+            for _, Point in Points do
+                table.insert(Keypoints, NumberSequenceKeypoint.new(Point[1], Point[2]))
+            end
+            New("UIGradient", {
+                Transparency = NumberSequence.new(Keypoints),
+                Parent = Line,
+            })
+
+            return Line
+        end
 
         if Text then
-            local TextLabel = New("TextLabel", {
+            CreateLine(1, { { 0, 1 }, { 0.7, 0.15 }, { 1, 0 } })
+            New("TextLabel", {
                 AutomaticSize = Enum.AutomaticSize.X,
                 BackgroundTransparency = 1,
-                Size = UDim2.fromScale(1, 0),
+                LayoutOrder = 2,
+                Size = UDim2.new(0, 0, 1, 0),
                 Text = Text,
-                TextSize = 14,
-                TextTransparency = 0.5,
-                TextXAlignment = Enum.TextXAlignment.Center,
-                Parent = InnerHolder,
+                TextSize = 13,
+                TextTransparency = 0.45,
+                Parent = Inner,
             })
-
-            local X, _ = Library:GetTextBounds(Text, TextLabel.FontFace, TextLabel.TextSize, TextLabel.AbsoluteSize.X / Library.DPIScale)
-            local SizeX = X // 2 + 10
-
-            New("Frame", {
-                AnchorPoint = Vector2.new(0, 0.5),
-                BackgroundColor3 = "MainColor",
-                BorderColor3 = "OutlineColor",
-                BorderSizePixel = 1,
-                Position = UDim2.fromScale(0, 0.5),
-                Size = UDim2.new(0.5, -SizeX, 0, 2),
-                Parent = InnerHolder,
-            })
-            New("Frame", {
-                AnchorPoint = Vector2.new(1, 0.5),
-                BackgroundColor3 = "MainColor",
-                BorderColor3 = "OutlineColor",
-                BorderSizePixel = 1,
-                Position = UDim2.fromScale(1, 0.5),
-                Size = UDim2.new(0.5, -SizeX, 0, 2),
-                Parent = InnerHolder,
-            })
+            CreateLine(3, { { 0, 0 }, { 0.3, 0.15 }, { 1, 1 } })
         else
-            New("Frame", {
-                AnchorPoint = Vector2.new(0, 0.5),
-                BackgroundColor3 = "MainColor",
-                BorderColor3 = "OutlineColor",
-                BorderSizePixel = 1,
-                Position = UDim2.fromScale(0, 0.5),
-                Size = UDim2.new(1, 0, 0, 2),
-                Parent = InnerHolder,
-            })
+            CreateLine(1, { { 0, 1 }, { 0.2, 0.05 }, { 0.8, 0.05 }, { 1, 1 } })
         end
 
         Groupbox:Resize()
@@ -10968,9 +11028,9 @@ do
 
             local Rows = math.max(1, math.ceil(TotalValues / Columns))
             local GridHeight = math.clamp(
-                Rows * CellHeight + (Rows - 1) * CellGap + 4,
-                CellHeight + 4,
-                8 * CellHeight + 7 * CellGap + 4
+                Rows * CellHeight + (Rows - 1) * CellGap + 8,
+                CellHeight + 8,
+                8 * CellHeight + 7 * CellGap + 8
             )
 
             GridScroll = New("ScrollingFrame", {
@@ -10991,9 +11051,10 @@ do
                 Parent = GridScroll,
             })
             New("UIPadding", {
-                PaddingBottom = UDim.new(0, 2),
-                PaddingRight = UDim.new(0, 6),
-                PaddingTop = UDim.new(0, 2),
+                PaddingBottom = UDim.new(0, 3),
+                PaddingLeft = UDim.new(0, 3),
+                PaddingRight = UDim.new(0, 7),
+                PaddingTop = UDim.new(0, 3),
                 Parent = GridScroll,
             })
 
@@ -11965,6 +12026,511 @@ do
 
         setmetatable(Row, BaseGroupbox)
         return Row
+    end
+
+    --// Card: background (color / image), icon, title, description, tag, footer and buttons \\--
+    -- Groupbox:AddCard({ Title = "Update", Description = "...", Image = 123, Buttons = { { Text = "Open", Variant = "Primary" } } })
+    function Funcs:AddCard(...)
+        if self.Destroyed then
+            return nil
+        end
+
+        local First, Second = select(1, ...), select(2, ...)
+        local Idx, Info
+        if typeof(First) == "table" then
+            Info = First
+        else
+            Idx, Info = First, Second
+        end
+
+        Info = Library:Validate(Info, Templates.Card)
+
+        local Groupbox = self
+        local Container = Groupbox.Container
+
+        local Card = {
+            Connections = {},
+            Destroyed = false,
+
+            Text = Info.Title,
+            Title = Info.Title,
+            Description = Info.Description,
+            Footer = Info.Footer,
+            Tag = Info.Tag,
+            Tooltip = Info.Description, --// makes the description searchable
+
+            Buttons = {},
+            Callback = Info.Callback,
+
+            Visible = Info.Visible,
+            Type = "Card",
+        }
+
+        local Holder = New("Frame", {
+            BackgroundColor3 = Info.BackgroundColor or "MainColor",
+            BackgroundTransparency = Info.BackgroundTransparency,
+            ClipsDescendants = true,
+            Size = UDim2.new(1, 0, 0, math.max(Info.Height, 40)),
+            Visible = Card.Visible,
+            Parent = Container,
+        })
+        local HolderCorner = New("UICorner", {
+            CornerRadius = UDim.new(0, Info.CornerRadius or (Library.CornerRadius / 2)),
+            Parent = Holder,
+        })
+        if Info.CornerRadius == nil then
+            table.insert(Library.Corners, HolderCorner)
+        end
+        local HolderStroke = New("UIStroke", {
+            Color = "OutlineColor",
+            Parent = Holder,
+        })
+
+        --// Background image + readability overlay \\--
+        local Background = New("ImageLabel", {
+            BackgroundTransparency = 1,
+            ImageTransparency = Info.ImageTransparency,
+            ScaleType = Info.ImageScaleType,
+            Size = UDim2.fromScale(1, 1),
+            Visible = false,
+            ZIndex = 1,
+            Parent = Holder,
+        })
+        local Overlay = New("Frame", {
+            BackgroundColor3 = "DarkColor",
+            BackgroundTransparency = 0.5,
+            Size = UDim2.fromScale(1, 1),
+            Visible = false,
+            ZIndex = 2,
+            Parent = Holder,
+        })
+        New("UIGradient", {
+            Rotation = 0,
+            Transparency = NumberSequence.new({
+                NumberSequenceKeypoint.new(0, 0.15),
+                NumberSequenceKeypoint.new(1, 0.75),
+            }),
+            Parent = Overlay,
+        })
+
+        local ClickButton = New("TextButton", {
+            BackgroundTransparency = 1,
+            Size = UDim2.fromScale(1, 1),
+            Text = "",
+            Visible = Info.Callback ~= nil,
+            ZIndex = 3,
+            Parent = Holder,
+        })
+
+        local Content = New("Frame", {
+            AutomaticSize = Enum.AutomaticSize.Y,
+            BackgroundTransparency = 1,
+            Size = UDim2.new(1, 0, 0, 0),
+            ZIndex = 4,
+            Parent = Holder,
+        })
+        New("UIListLayout", {
+            Padding = UDim.new(0, 6),
+            Parent = Content,
+        })
+        New("UIPadding", {
+            PaddingBottom = UDim.new(0, 10),
+            PaddingLeft = UDim.new(0, 10),
+            PaddingRight = UDim.new(0, 10),
+            PaddingTop = UDim.new(0, 10),
+            Parent = Content,
+        })
+
+        --// Header: icon, title, tag \\--
+        local Header = New("Frame", {
+            AutomaticSize = Enum.AutomaticSize.Y,
+            BackgroundTransparency = 1,
+            LayoutOrder = 1,
+            Size = UDim2.new(1, 0, 0, 0),
+            ZIndex = 4,
+            Parent = Content,
+        })
+        New("UIListLayout", {
+            FillDirection = Enum.FillDirection.Horizontal,
+            Padding = UDim.new(0, 8),
+            VerticalAlignment = Enum.VerticalAlignment.Center,
+            Parent = Header,
+        })
+
+        local IconImage = New("ImageLabel", {
+            ImageColor3 = "AccentColor",
+            LayoutOrder = 1,
+            Size = UDim2.fromOffset(Info.TitleSize + 4, Info.TitleSize + 4),
+            Visible = false,
+            ZIndex = 4,
+            Parent = Header,
+        })
+        local TitleLabel = New("TextLabel", {
+            AutomaticSize = Enum.AutomaticSize.Y,
+            BackgroundTransparency = 1,
+            LayoutOrder = 2,
+            Size = UDim2.new(0, 0, 0, 0),
+            Text = Info.Title,
+            TextSize = Info.TitleSize,
+            TextWrapped = true,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            ZIndex = 4,
+            Parent = Header,
+        })
+        New("UIFlexItem", {
+            FlexMode = Enum.UIFlexMode.Grow,
+            Parent = TitleLabel,
+        })
+
+        local TagFrame = New("Frame", {
+            AutomaticSize = Enum.AutomaticSize.X,
+            BackgroundColor3 = "AccentColor",
+            LayoutOrder = 3,
+            Size = UDim2.fromOffset(0, 16),
+            Visible = false,
+            ZIndex = 4,
+            Parent = Header,
+        })
+        New("UICorner", {
+            CornerRadius = UDim.new(1, 0),
+            Parent = TagFrame,
+        })
+        local TagLabel = New("TextLabel", {
+            AutomaticSize = Enum.AutomaticSize.X,
+            BackgroundTransparency = 1,
+            Size = UDim2.fromOffset(0, 16),
+            Text = "",
+            TextColor3 = "WhiteColor",
+            TextSize = 11,
+            ZIndex = 4,
+            Parent = TagFrame,
+        })
+        New("UIPadding", {
+            PaddingLeft = UDim.new(0, 6),
+            PaddingRight = UDim.new(0, 6),
+            Parent = TagLabel,
+        })
+
+        local DescriptionLabel = New("TextLabel", {
+            AutomaticSize = Enum.AutomaticSize.Y,
+            BackgroundTransparency = 1,
+            LayoutOrder = 2,
+            Size = UDim2.new(1, 0, 0, 0),
+            Text = Info.Description or "",
+            TextSize = Info.DescriptionSize,
+            TextTransparency = 0.25,
+            TextWrapped = true,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            TextYAlignment = Enum.TextYAlignment.Top,
+            Visible = Info.Description ~= nil and Info.Description ~= "",
+            ZIndex = 4,
+            Parent = Content,
+        })
+
+        local ButtonsRow = New("Frame", {
+            BackgroundTransparency = 1,
+            LayoutOrder = 3,
+            Size = UDim2.new(1, 0, 0, 24),
+            Visible = false,
+            ZIndex = 4,
+            Parent = Content,
+        })
+        New("UIListLayout", {
+            FillDirection = Enum.FillDirection.Horizontal,
+            HorizontalFlex = Enum.UIFlexAlignment.Fill,
+            Padding = UDim.new(0, 8),
+            Parent = ButtonsRow,
+        })
+
+        local FooterLabel = New("TextLabel", {
+            AutomaticSize = Enum.AutomaticSize.Y,
+            BackgroundTransparency = 1,
+            LayoutOrder = 4,
+            Size = UDim2.new(1, 0, 0, 0),
+            Text = Info.Footer or "",
+            TextSize = 12,
+            TextTransparency = 0.5,
+            TextWrapped = true,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            Visible = Info.Footer ~= nil and Info.Footer ~= "",
+            ZIndex = 4,
+            Parent = Content,
+        })
+
+        --// The card grows with its content (wrapped description, buttons, ...) \\--
+        local function SyncHeight()
+            if Card.Destroyed then
+                return
+            end
+
+            local Height = math.ceil(math.max(Info.Height, 40, Content.AbsoluteSize.Y / Library.DPIScale))
+            if Holder.Size.Y.Offset ~= Height then
+                Holder.Size = UDim2.new(1, 0, 0, Height)
+                Groupbox:Resize()
+            end
+        end
+        table.insert(Card.Connections, Content:GetPropertyChangedSignal("AbsoluteSize"):Connect(SyncHeight))
+
+        --// Setters \\--
+        function Card:SetTitle(Text: string)
+            Card.Title, Card.Text = Text, Text
+            TitleLabel.Text = Text
+        end
+
+        function Card:SetDescription(Text: string?)
+            Card.Description, Card.Tooltip = Text, Text
+            DescriptionLabel.Text = Text or ""
+            DescriptionLabel.Visible = Text ~= nil and Text ~= ""
+        end
+
+        function Card:SetFooter(Text: string?)
+            Card.Footer = Text
+            FooterLabel.Text = Text or ""
+            FooterLabel.Visible = Text ~= nil and Text ~= ""
+        end
+
+        function Card:SetTag(Text: string?)
+            Card.Tag = Text
+            TagLabel.Text = Text and tostring(Text) or ""
+            TagFrame.Visible = Text ~= nil and tostring(Text) ~= ""
+        end
+
+        function Card:SetIcon(Icon: string?)
+            local Parsed = Icon and Library:GetCustomIcon(Icon)
+            IconImage.Visible = Parsed ~= nil
+            if Parsed then
+                Library:ApplyLucideIcon(IconImage, Parsed)
+            end
+        end
+
+        function Card:SetImage(Image: string | number | nil)
+            local Parsed = Image and Library:GetCustomIcon(Image)
+            Background.Visible = Parsed ~= nil
+            Overlay.Visible = Parsed ~= nil
+
+            if Parsed then
+                Library:ApplyLucideIcon(Background, Parsed)
+            else
+                Background.Image = ""
+            end
+        end
+
+        function Card:SetImageTransparency(Transparency: number)
+            Background.ImageTransparency = Transparency
+        end
+
+        function Card:SetBackgroundColor(Color: Color3 | string)
+            Library.Registry[Holder] = Library.Registry[Holder] or {}
+
+            if typeof(Color) == "string" then
+                Library.Registry[Holder].BackgroundColor3 = Color
+                Holder.BackgroundColor3 = Library.Scheme[Color] or Holder.BackgroundColor3
+            else
+                Library.Registry[Holder].BackgroundColor3 = nil
+                Holder.BackgroundColor3 = Color
+            end
+        end
+
+        function Card:SetBackgroundTransparency(Transparency: number)
+            Holder.BackgroundTransparency = Transparency
+        end
+
+        function Card:SetHeight(Height: number)
+            Info.Height = Height
+            SyncHeight()
+        end
+
+        function Card:SetVisible(Visible: boolean)
+            Card.Visible = Visible
+            Holder.Visible = Visible
+            Groupbox:Resize()
+        end
+
+        function Card:OnClick(Func)
+            Card.Callback = Func
+            ClickButton.Visible = Func ~= nil
+        end
+
+        --// Buttons: { Text, Callback / Func, Variant = "Secondary" | "Primary" | "Destructive" | "Ghost", Disabled, Tooltip } \\--
+        function Card:AddButton(ButtonInfo)
+            ButtonInfo = typeof(ButtonInfo) == "table" and ButtonInfo or { Text = tostring(ButtonInfo) }
+
+            local Button = {
+                Text = ButtonInfo.Text or "Button",
+                Func = ButtonInfo.Func or ButtonInfo.Callback,
+                Variant = ButtonInfo.Variant or "Secondary",
+                Disabled = ButtonInfo.Disabled == true,
+                Visible = ButtonInfo.Visible ~= false,
+                Type = "CardButton",
+            }
+
+            local BackgroundKey, TextKey = "MainColor", "FontColor"
+            if Button.Variant == "Primary" then
+                BackgroundKey, TextKey = "AccentColor", "WhiteColor"
+            elseif Button.Variant == "Destructive" then
+                BackgroundKey, TextKey = "DestructiveColor", "WhiteColor"
+            end
+
+            local Base = New("TextButton", {
+                BackgroundColor3 = BackgroundKey,
+                BackgroundTransparency = Button.Variant == "Ghost" and 1 or 0,
+                LayoutOrder = #Card.Buttons + 1,
+                Size = UDim2.fromScale(1, 1),
+                Text = Button.Text,
+                TextColor3 = TextKey,
+                TextSize = 14,
+                TextTransparency = 0.2,
+                Visible = Button.Visible,
+                ZIndex = 4,
+                Parent = ButtonsRow,
+            })
+            table.insert(
+                Library.Corners,
+                New("UICorner", {
+                    CornerRadius = UDim.new(0, Library.CornerRadius / 2),
+                    Parent = Base,
+                })
+            )
+            New("UIStroke", {
+                Color = "OutlineColor",
+                Parent = Base,
+            })
+
+            local function Paint()
+                Base.Active = not Button.Disabled
+                Base.TextTransparency = Button.Disabled and 0.8 or 0.2
+            end
+            Paint()
+
+            Base.MouseEnter:Connect(function()
+                if not Button.Disabled then
+                    TweenService:Create(Base, Library.TweenInfo, { TextTransparency = 0 }):Play()
+                end
+            end)
+            Base.MouseLeave:Connect(function()
+                if not Button.Disabled then
+                    TweenService:Create(Base, Library.TweenInfo, { TextTransparency = 0.2 }):Play()
+                end
+            end)
+            Base.MouseButton1Click:Connect(function()
+                if not Button.Disabled then
+                    Library:SafeCallback(Button.Func, Card)
+                end
+            end)
+
+            if typeof(ButtonInfo.Tooltip) == "string" then
+                Button.TooltipTable = Library:AddTooltip(ButtonInfo.Tooltip, nil, Base)
+            end
+
+            function Button:SetText(Text: string)
+                Button.Text = Text
+                Base.Text = Text
+            end
+
+            function Button:SetDisabled(Disabled: boolean)
+                Button.Disabled = Disabled
+                Paint()
+            end
+
+            function Button:SetVisible(Visible: boolean)
+                Button.Visible = Visible
+                Base.Visible = Visible
+            end
+
+            function Button:Destroy()
+                if Button.TooltipTable then
+                    Button.TooltipTable:Destroy()
+                end
+                Base:Destroy()
+
+                local Index = table.find(Card.Buttons, Button)
+                if Index then
+                    table.remove(Card.Buttons, Index)
+                end
+                ButtonsRow.Visible = #Card.Buttons > 0
+            end
+
+            Button.Base = Base
+            table.insert(Card.Buttons, Button)
+            ButtonsRow.Visible = true
+
+            return Button
+        end
+
+        function Card:ClearButtons()
+            for Index = #Card.Buttons, 1, -1 do
+                Card.Buttons[Index]:Destroy()
+            end
+        end
+
+        --// Click on the whole card \\--
+        table.insert(Card.Connections, ClickButton.MouseButton1Click:Connect(function()
+            Library:SafeCallback(Card.Callback, Card)
+        end))
+        table.insert(Card.Connections, ClickButton.MouseEnter:Connect(function()
+            Library.Registry[HolderStroke].Color = "AccentColor"
+            TweenService:Create(HolderStroke, Library.TweenInfo, { Color = Library.Scheme.AccentColor }):Play()
+        end))
+        table.insert(Card.Connections, ClickButton.MouseLeave:Connect(function()
+            Library.Registry[HolderStroke].Color = "OutlineColor"
+            TweenService:Create(HolderStroke, Library.TweenInfo, { Color = Library.Scheme.OutlineColor }):Play()
+        end))
+
+        --// Initial state \\--
+        Card:SetIcon(Info.Icon)
+        Card:SetImage(Info.Image)
+        Card:SetTag(Info.Tag)
+        for _, ButtonInfo in Info.Buttons do
+            Card:AddButton(ButtonInfo)
+        end
+
+        if typeof(Info.BackgroundColor) == "Color3" then
+            Library.Registry[Holder] = Library.Registry[Holder] or {}
+        end
+
+        Groupbox:Resize()
+        task.defer(SyncHeight)
+
+        Card.Holder = Holder
+        Card.HighlightLabel = TitleLabel
+        table.insert(Groupbox.Elements, Card)
+
+        if Idx ~= nil then
+            Options[Idx] = Card
+        end
+
+        function Card:Destroy()
+            Card.Destroyed = true
+
+            for _, Connection in Card.Connections do
+                Connection:Disconnect()
+            end
+
+            for _, Button in Card.Buttons do
+                if Button.TooltipTable then
+                    Button.TooltipTable:Destroy()
+                end
+            end
+
+            local CornerIdx = table.find(Library.Corners, HolderCorner)
+            if CornerIdx then
+                table.remove(Library.Corners, CornerIdx)
+            end
+
+            Holder:Destroy()
+
+            local ElemIdx = table.find(Groupbox.Elements, Card)
+            if ElemIdx then
+                table.remove(Groupbox.Elements, ElemIdx)
+            end
+
+            Groupbox:Resize()
+            if Idx ~= nil then
+                Options[Idx] = nil
+            end
+        end
+
+        return Card
     end
 
     function Funcs:AddDependencyBox()
@@ -12966,6 +13532,512 @@ function Library:Notify(...)
     return Data
 end
 
+--// Toolbar: top center controller (show / hide UI, keybind list, watermark, ... and your own buttons) \\--
+function Library:CreateToolbar(Info)
+    if Library.Toolbar then
+        return Library.Toolbar
+    end
+
+    Info = Library:Validate(typeof(Info) == "table" and Info or {}, Templates.Toolbar)
+
+    local Holder = New("Frame", {
+        AnchorPoint = Vector2.new(0.5, 0),
+        AutomaticSize = Enum.AutomaticSize.XY,
+        BackgroundColor3 = "BackgroundColor",
+        Position = UDim2.new(0.5, 0, 0, Info.Offset),
+        Size = UDim2.fromOffset(0, 0),
+        Visible = Info.Visible,
+        ZIndex = 15,
+        Parent = ScreenGui,
+    })
+    table.insert(
+        Library.Corners,
+        New("UICorner", {
+            CornerRadius = UDim.new(0, Library.CornerRadius),
+            Parent = Holder,
+        })
+    )
+    Library:AddOutline(Holder)
+
+    local HolderScale = New("UIScale", {
+        Parent = Holder,
+    })
+    table.insert(Library.Scales, HolderScale)
+    HolderScale.Scale = Library.DPIScale
+
+    New("UIListLayout", {
+        FillDirection = Enum.FillDirection.Horizontal,
+        VerticalAlignment = Enum.VerticalAlignment.Center,
+        Padding = UDim.new(0, 4),
+        Parent = Holder,
+    })
+    New("UIPadding", {
+        PaddingBottom = UDim.new(0, 5),
+        PaddingLeft = UDim.new(0, 6),
+        PaddingRight = UDim.new(0, 6),
+        PaddingTop = UDim.new(0, 5),
+        Parent = Holder,
+    })
+
+    local Toolbar = {
+        Holder = Holder,
+        Buttons = {},
+        Destroyed = false,
+    }
+    local Order = 0
+
+    function Toolbar:AddSeparator()
+        Order += 1
+
+        return New("Frame", {
+            BackgroundColor3 = "OutlineColor",
+            LayoutOrder = Order,
+            Size = UDim2.fromOffset(1, Info.ButtonSize - 10),
+            Parent = Holder,
+        })
+    end
+
+    --// Info: Icon, Tooltip, Toggle (stays active), Active, Callback(Active), Visible, Order \\--
+    function Toolbar:AddButton(ButtonInfo)
+        ButtonInfo = typeof(ButtonInfo) == "table" and ButtonInfo or {}
+        Order += 1
+
+        local Button = {
+            Type = "ToolbarButton",
+            Destroyed = false,
+
+            Active = ButtonInfo.Active == true,
+            Toggle = ButtonInfo.Toggle == true,
+            Callback = ButtonInfo.Callback,
+            Visible = ButtonInfo.Visible ~= false,
+            Tooltip = ButtonInfo.Tooltip,
+            TooltipTable = nil,
+        }
+
+        local Base = New("TextButton", {
+            BackgroundColor3 = "MainColor",
+            BackgroundTransparency = 1,
+            LayoutOrder = tonumber(ButtonInfo.Order) or Order,
+            Size = UDim2.fromOffset(Info.ButtonSize, Info.ButtonSize),
+            Text = "",
+            Visible = Button.Visible,
+            Parent = Holder,
+        })
+        table.insert(
+            Library.Corners,
+            New("UICorner", {
+                CornerRadius = UDim.new(0, Library.CornerRadius / 2),
+                Parent = Base,
+            })
+        )
+
+        local Parsed = Library:GetCustomIcon(ButtonInfo.Icon)
+        local Icon
+        if Parsed then
+            Icon = New("ImageLabel", {
+                AnchorPoint = Vector2.new(0.5, 0.5),
+                ImageColor3 = Parsed.Custom and "WhiteColor" or "FontColor",
+                ImageTransparency = 0.4,
+                Position = UDim2.fromScale(0.5, 0.5),
+                Size = UDim2.fromOffset(Info.IconSize, Info.IconSize),
+                Parent = Base,
+            })
+            Library:ApplyLucideIcon(Icon, Parsed)
+        else
+            Icon = New("TextLabel", {
+                BackgroundTransparency = 1,
+                Size = UDim2.fromScale(1, 1),
+                Text = tostring(ButtonInfo.Icon or "?"),
+                TextSize = 14,
+                TextTransparency = 0.4,
+                Parent = Base,
+            })
+        end
+
+        local function Paint()
+            local Key = Button.Active and "AccentColor" or "FontColor"
+            local Transparency = Button.Active and 0 or 0.4
+            local Registry = Library.Registry[Icon]
+
+            if Icon:IsA("ImageLabel") then
+                if not (Parsed and Parsed.Custom) then
+                    Icon.ImageColor3 = Library.Scheme[Key]
+                    if Registry then
+                        Registry.ImageColor3 = Key
+                    end
+                end
+
+                TweenService:Create(Icon, Library.TweenInfo, { ImageTransparency = Transparency }):Play()
+            else
+                Icon.TextColor3 = Library.Scheme[Key]
+                if Registry then
+                    Registry.TextColor3 = Key
+                end
+
+                TweenService:Create(Icon, Library.TweenInfo, { TextTransparency = Transparency }):Play()
+            end
+        end
+        Paint()
+
+        function Button:SetActive(State: boolean, Silent: boolean?)
+            Button.Active = State == true
+            Paint()
+
+            if not Silent then
+                Library:SafeCallback(Button.Callback, Button.Active)
+            end
+        end
+
+        function Button:SetVisible(Visible: boolean)
+            Button.Visible = Visible
+            Base.Visible = Visible
+        end
+
+        function Button:SetTooltip(Text: string?)
+            Button.Tooltip = Text
+            if Button.TooltipTable then
+                Button.TooltipTable:Destroy()
+                Button.TooltipTable = nil
+            end
+            if typeof(Text) == "string" then
+                Button.TooltipTable = Library:AddTooltip(Text, nil, Base)
+            end
+        end
+
+        function Button:Destroy()
+            Button.Destroyed = true
+
+            if Button.TooltipTable then
+                Button.TooltipTable:Destroy()
+            end
+            Base:Destroy()
+
+            local Idx = table.find(Toolbar.Buttons, Button)
+            if Idx then
+                table.remove(Toolbar.Buttons, Idx)
+            end
+        end
+
+        Base.MouseEnter:Connect(function()
+            TweenService:Create(Base, Library.TweenInfo, { BackgroundTransparency = 0.7 }):Play()
+        end)
+        Base.MouseLeave:Connect(function()
+            TweenService:Create(Base, Library.TweenInfo, { BackgroundTransparency = 1 }):Play()
+        end)
+        Base.MouseButton1Click:Connect(function()
+            if Button.Toggle then
+                Button:SetActive(not Button.Active)
+            else
+                Library:SafeCallback(Button.Callback)
+            end
+        end)
+
+        Button:SetTooltip(Button.Tooltip)
+        Button.Base = Base
+        table.insert(Toolbar.Buttons, Button)
+
+        return Button
+    end
+
+    function Toolbar:SetVisible(Visible: boolean)
+        Holder.Visible = Visible
+    end
+
+    function Toolbar:Destroy()
+        Toolbar.Destroyed = true
+        Holder:Destroy()
+        Library.Toolbar = nil
+    end
+
+    if Info.Draggable then
+        Library:MakeDraggable(Holder, Holder, true)
+    end
+
+    Library.Toolbar = Toolbar
+    return Toolbar
+end
+
+function Library:SetKeybindListVisible(Visible: boolean)
+    if Library.KeybindFrame then
+        Library.KeybindFrame.Visible = Visible
+    end
+
+    if Library.Toolbar and Library.Toolbar.KeybindButton then
+        Library.Toolbar.KeybindButton:SetActive(Visible, true)
+    end
+end
+
+--// Watermark: icon + title + dot separated segments (game, player, fps, ping, time and your own) \\--
+function Library:CreateWatermark(Info)
+    if Library.Watermark then
+        return Library.Watermark
+    end
+
+    Info = Library:Validate(typeof(Info) == "table" and Info or {}, Templates.Watermark)
+
+    local Holder = New("Frame", {
+        AnchorPoint = Vector2.new(1, 0),
+        AutomaticSize = Enum.AutomaticSize.X,
+        BackgroundColor3 = "BackgroundColor",
+        Position = typeof(Info.Position) == "UDim2" and Info.Position or UDim2.new(1, -6, 0, 6),
+        Size = UDim2.fromOffset(0, 26),
+        Visible = Info.Visible,
+        ZIndex = 14,
+        Parent = ScreenGui,
+    })
+    table.insert(
+        Library.Corners,
+        New("UICorner", {
+            CornerRadius = UDim.new(0, Library.CornerRadius / 2),
+            Parent = Holder,
+        })
+    )
+    Library:AddOutline(Holder)
+
+    local HolderScale = New("UIScale", {
+        Parent = Holder,
+    })
+    table.insert(Library.Scales, HolderScale)
+    HolderScale.Scale = Library.DPIScale
+
+    local Inner = New("Frame", {
+        AutomaticSize = Enum.AutomaticSize.X,
+        BackgroundTransparency = 1,
+        Size = UDim2.new(0, 0, 1, 0),
+        Parent = Holder,
+    })
+    New("UIListLayout", {
+        FillDirection = Enum.FillDirection.Horizontal,
+        VerticalAlignment = Enum.VerticalAlignment.Center,
+        Padding = UDim.new(0, 6),
+        Parent = Inner,
+    })
+    New("UIPadding", {
+        PaddingLeft = UDim.new(0, 8),
+        PaddingRight = UDim.new(0, 8),
+        Parent = Inner,
+    })
+
+    --// Thin accent line on top that fades out on both sides \\--
+    local TopLine = New("Frame", {
+        BackgroundColor3 = "AccentColor",
+        Position = UDim2.fromOffset(0, 0),
+        Size = UDim2.new(1, 0, 0, 1),
+        ZIndex = 16,
+        Parent = Holder,
+    })
+    New("UIGradient", {
+        Transparency = NumberSequence.new({
+            NumberSequenceKeypoint.new(0, 1),
+            NumberSequenceKeypoint.new(0.25, 0.1),
+            NumberSequenceKeypoint.new(0.75, 0.1),
+            NumberSequenceKeypoint.new(1, 1),
+        }),
+        Parent = TopLine,
+    })
+
+    local IconImage = New("ImageLabel", {
+        ImageColor3 = "AccentColor",
+        LayoutOrder = 1,
+        Size = UDim2.fromOffset(16, 16),
+        Visible = false,
+        Parent = Inner,
+    })
+    local Label = New("TextLabel", {
+        AutomaticSize = Enum.AutomaticSize.X,
+        BackgroundTransparency = 1,
+        LayoutOrder = 2,
+        Size = UDim2.new(0, 0, 1, 0),
+        Text = "",
+        TextSize = 14,
+        Parent = Inner,
+    })
+
+    local Watermark = {
+        Holder = Holder,
+        Label = Label,
+
+        Title = Info.Title,
+        Separator = Info.Separator,
+        Segments = {},
+
+        FPS = 60,
+        Ping = 0,
+        GameName = nil,
+
+        Destroyed = false,
+    }
+
+    local function FindSegment(Id: string)
+        for Index, Segment in Watermark.Segments do
+            if Segment.Id == Id then
+                return Segment, Index
+            end
+        end
+
+        return nil, nil
+    end
+
+    function Watermark:Refresh()
+        if Watermark.Destroyed then
+            return
+        end
+
+        local Accent = Library.Scheme.AccentColor:ToHex()
+        local Dim = Library:GetDarkerColor(Library.Scheme.FontColor):ToHex()
+
+        local Parts = { string.format('<b><font color="#%s">%s</font></b>', Accent, tostring(Watermark.Title)) }
+        for _, Segment in Watermark.Segments do
+            if Segment.Visible == false then
+                continue
+            end
+
+            local Text = Segment.Text
+            if typeof(Text) == "function" then
+                local Ok, Result = pcall(Text, Watermark)
+                Text = Ok and Result or nil
+            end
+
+            if Text ~= nil and tostring(Text) ~= "" then
+                table.insert(Parts, tostring(Text))
+            end
+        end
+
+        Label.Text = table.concat(Parts, string.format(' <font color="#%s">%s</font> ', Dim, Watermark.Separator))
+    end
+
+    --// AddSegment("Id", "text" | function(Watermark) return "text" end) \\--
+    function Watermark:AddSegment(Id: string, Text: any, Visible: boolean?)
+        local Existing = FindSegment(Id)
+        if Existing then
+            Existing.Text = Text
+            if Visible ~= nil then
+                Existing.Visible = Visible
+            end
+        else
+            table.insert(Watermark.Segments, { Id = Id, Text = Text, Visible = Visible ~= false })
+        end
+
+        Watermark:Refresh()
+    end
+
+    function Watermark:RemoveSegment(Id: string)
+        local _, Index = FindSegment(Id)
+        if Index then
+            table.remove(Watermark.Segments, Index)
+            Watermark:Refresh()
+        end
+    end
+
+    function Watermark:SetSegmentVisible(Id: string, Visible: boolean)
+        local Segment = FindSegment(Id)
+        if Segment then
+            Segment.Visible = Visible
+            Watermark:Refresh()
+        end
+    end
+
+    function Watermark:SetTitle(Title: string)
+        Watermark.Title = Title
+        Watermark:Refresh()
+    end
+
+    function Watermark:SetIcon(Icon: string?)
+        local Parsed = Icon and Library:GetCustomIcon(Icon)
+        IconImage.Visible = Parsed ~= nil
+        if Parsed then
+            Library:ApplyLucideIcon(IconImage, Parsed)
+        end
+    end
+
+    function Watermark:SetVisible(Visible: boolean)
+        Holder.Visible = Visible
+        if Visible then
+            Watermark:Refresh()
+        end
+
+        if Library.Toolbar and Library.Toolbar.WatermarkButton then
+            Library.Toolbar.WatermarkButton:SetActive(Visible, true)
+        end
+    end
+
+    function Watermark:SetPosition(Position: UDim2)
+        Holder.Position = Position
+    end
+
+    function Watermark:Destroy()
+        Watermark.Destroyed = true
+        Holder:Destroy()
+        Library.Watermark = nil
+    end
+
+    --// Built-in segments (toggle them with Watermark:SetSegmentVisible) \\--
+    Watermark:AddSegment("game", function(Self)
+        return Self.GameName
+    end, Info.ShowGame)
+    Watermark:AddSegment("player", function()
+        return Library.LocalPlayer.DisplayName
+    end, Info.ShowPlayer)
+    Watermark:AddSegment("fps", function(Self)
+        return string.format("%d fps", Self.FPS)
+    end, Info.ShowFPS)
+    Watermark:AddSegment("ping", function(Self)
+        return string.format("%d ms", Self.Ping)
+    end, Info.ShowPing)
+    Watermark:AddSegment("time", function()
+        return os.date("%H:%M")
+    end, Info.ShowTime)
+
+    for Index, Segment in Info.Segments do
+        if typeof(Segment) == "table" then
+            Watermark:AddSegment(Segment.Id or ("custom_" .. Index), Segment.Text, Segment.Visible)
+        else
+            Watermark:AddSegment("custom_" .. Index, Segment)
+        end
+    end
+
+    task.spawn(function()
+        local Ok, Product = pcall(function()
+            return MarketplaceService:GetProductInfo(game.PlaceId)
+        end)
+
+        Watermark.GameName = Ok and Product and Product.Name or game.Name
+        Watermark:Refresh()
+    end)
+
+    local Frames, LastUpdate = 0, os.clock()
+    Library:GiveSignal(RunService.Heartbeat:Connect(function()
+        Frames += 1
+
+        local Now = os.clock()
+        if Now - LastUpdate < Info.Interval then
+            return
+        end
+
+        Watermark.FPS = math.floor(Frames / (Now - LastUpdate) + 0.5)
+        Frames, LastUpdate = 0, Now
+
+        local Ok, Ping = pcall(function()
+            return Stats.Network.ServerStatsItem["Data Ping"]:GetValue()
+        end)
+        Watermark.Ping = Ok and math.floor(Ping + 0.5) or 0
+
+        if Holder.Visible then
+            Watermark:Refresh()
+        end
+    end))
+
+    Watermark:SetIcon(Info.Icon)
+    Watermark:Refresh()
+
+    if Info.Draggable then
+        Library:MakeDraggable(Holder, Holder, true)
+    end
+
+    Library.Watermark = Watermark
+    return Watermark
+end
+
 function Library:CreateWindow(WindowInfo)
     WindowInfo = Library:Validate(WindowInfo, Templates.Window)
     local ViewportSize: Vector2 = workspace.CurrentCamera.ViewportSize
@@ -13120,16 +14192,6 @@ function Library:CreateWindow(WindowInfo)
         if Entry.Icon then
             Entry.Label.Visible = not IsCompact
             Entry.Icon.SizeConstraint = IsCompact and Enum.SizeConstraint.RelativeXY or Enum.SizeConstraint.RelativeYY
-        end
-
-        if Entry.BadgeFrame then
-            if Compact then
-                Entry.BadgeFrame.AnchorPoint = Vector2.new(1, 0)
-                Entry.BadgeFrame.Position = UDim2.new(1, -2, 0, 2)
-            else
-                Entry.BadgeFrame.AnchorPoint = Vector2.new(1, 0.5)
-                Entry.BadgeFrame.Position = UDim2.new(1, -8, 0.5, 0)
-            end
         end
 
         if Entry.Indicator then
@@ -15472,75 +16534,6 @@ function Library:CreateWindow(WindowInfo)
         end
 
         --// Sub Pages \\--
-        --// Badge on the tab button: Tab:SetBadge(3) / Tab:SetBadge("NEW", Color3) / Tab:SetBadge(nil) \\--
-        function Tab:SetBadge(Text: any, Color: Color3?)
-            local Hidden = Text == nil or Text == false or tostring(Text) == ""
-
-            if Hidden then
-                if Tab.BadgeFrame then
-                    Tab.BadgeFrame:Destroy()
-                    Tab.BadgeFrame, Tab.BadgeLabel = nil, nil
-                end
-                Tab.Badge = nil
-
-                for _, Entry in Library.TabButtons do
-                    if Entry.Button == TabButton then
-                        Entry.BadgeFrame = nil
-                        break
-                    end
-                end
-
-                return
-            end
-
-            if not Tab.BadgeFrame then
-                Tab.BadgeFrame = New("Frame", {
-                    AnchorPoint = Vector2.new(1, 0.5),
-                    AutomaticSize = Enum.AutomaticSize.X,
-                    BackgroundColor3 = "AccentColor",
-                    Position = UDim2.new(1, -8, 0.5, 0),
-                    Size = UDim2.fromOffset(0, 16),
-                    Parent = TabButton,
-                })
-                New("UICorner", {
-                    CornerRadius = UDim.new(1, 0),
-                    Parent = Tab.BadgeFrame,
-                })
-
-                Tab.BadgeLabel = New("TextLabel", {
-                    AutomaticSize = Enum.AutomaticSize.X,
-                    BackgroundTransparency = 1,
-                    Size = UDim2.fromOffset(0, 16),
-                    TextColor3 = "WhiteColor",
-                    TextSize = 11,
-                    Parent = Tab.BadgeFrame,
-                })
-                New("UIPadding", {
-                    PaddingLeft = UDim.new(0, 6),
-                    PaddingRight = UDim.new(0, 6),
-                    Parent = Tab.BadgeLabel,
-                })
-            end
-
-            Tab.Badge = tostring(Text)
-            Tab.BadgeLabel.Text = Tab.Badge
-
-            if typeof(Color) == "Color3" then
-                Tab.BadgeFrame.BackgroundColor3 = Color
-                if Library.Registry[Tab.BadgeFrame] then
-                    Library.Registry[Tab.BadgeFrame].BackgroundColor3 = nil
-                end
-            end
-
-            for _, Entry in Library.TabButtons do
-                if Entry.Button == TabButton then
-                    Entry.BadgeFrame = Tab.BadgeFrame
-                    ApplyTabEntry(Entry)
-                    break
-                end
-            end
-        end
-
         function Tab:SetSubPageButtonsVisible(Visible: boolean)
             if not Tab.SubPages then
                 return
@@ -17132,6 +18125,10 @@ function Library:CreateWindow(WindowInfo)
             MainFrame.Visible = Library.Toggled
         end
 
+        if Library.Toolbar and Library.Toolbar.MenuButton then
+            Library.Toolbar.MenuButton:SetActive(Library.Toggled, true)
+        end
+
         if WindowInfo.UnlockMouseWhileOpen then
             ModalElement.Modal = Library.Toggled
         end
@@ -17343,7 +18340,79 @@ function Library:CreateWindow(WindowInfo)
     end))
 
     Window.MainFrame = MainFrame
+    Window.WindowInfo = WindowInfo
     Library.Window = Window
+
+    function Window:AddToolbarButton(ButtonInfo)
+        return Library:CreateToolbar({}):AddButton(ButtonInfo)
+    end
+
+    function Window:AddWatermark(WatermarkInfo)
+        return Library:CreateWatermark(WatermarkInfo)
+    end
+
+    function Window:SetSettingsTab(SettingsTab, SettingsInfo)
+        return Library:SetSettingsTab(SettingsTab, SettingsInfo)
+    end
+
+    if WindowInfo.Watermark then
+        local WatermarkInfo = typeof(WindowInfo.Watermark) == "table" and WindowInfo.Watermark or {}
+        if WatermarkInfo.Title == nil then
+            WatermarkInfo.Title = WindowInfo.Title
+        end
+
+        Library:CreateWatermark(WatermarkInfo)
+    end
+
+    if WindowInfo.Toolbar ~= false then
+        local ToolbarInfo = typeof(WindowInfo.Toolbar) == "table" and WindowInfo.Toolbar or {}
+        local Toolbar = Library:CreateToolbar(ToolbarInfo)
+
+        if Toolbar.Holder and ToolbarInfo.DefaultButtons ~= false then
+            Toolbar.MenuButton = Toolbar:AddButton({
+                Icon = "house",
+                Tooltip = "Show / hide the UI",
+                Toggle = true,
+                Active = Library.Toggled,
+                Callback = function(Active)
+                    Library:Toggle(Active)
+                end,
+            })
+
+            Toolbar.KeybindButton = Toolbar:AddButton({
+                Icon = "keyboard",
+                Tooltip = "Keybind list",
+                Toggle = true,
+                Active = Library.KeybindFrame.Visible,
+                Callback = function(Active)
+                    Library.KeybindFrame.Visible = Active
+                end,
+            })
+
+            Toolbar.WatermarkButton = Toolbar:AddButton({
+                Icon = "layout-panel-top",
+                Tooltip = "Watermark",
+                Toggle = true,
+                Active = Library.Watermark ~= nil and Library.Watermark.Holder.Visible,
+                Callback = function(Active)
+                    local Watermark = Library.Watermark or Library:CreateWatermark({ Title = WindowInfo.Title })
+                    Watermark:SetVisible(Active)
+                end,
+            })
+
+            Toolbar.SettingsButton = Toolbar:AddButton({
+                Icon = "settings",
+                Tooltip = "Settings",
+                Visible = Library.SettingsTab ~= nil,
+                Callback = function()
+                    if Library.SettingsTab then
+                        Library:Toggle(true)
+                        Library.SettingsTab.Tab:Show()
+                    end
+                end,
+            })
+        end
+    end
 
     return Window
 end
@@ -18037,6 +19106,868 @@ function Library:CreateLoading(LoadingInfo)
     return Loading
 end
 
+--// Built-in settings tab: Library:SetSettingsTab(Tab) / Window:SetSettingsTab(Tab) -> sub pages Config, Theme and UI \\--
+-- Info: { Folder = "Octo", Config = true, Theme = true, UI = true, IgnoreIndexes = { "SomeIdx" } }
+-- Call it after all of your elements exist, so the autoload config can be applied to them.
+function Library:SetSettingsTab(Tab, Info)
+    assert(typeof(Tab) == "table" and Tab.AddSubPage, "SetSettingsTab expects a tab created with Window:AddTab")
+
+    if Library.SettingsTab then
+        warn("The settings tab is already set.")
+        return Library.SettingsTab
+    end
+
+    Info = typeof(Info) == "table" and Info or {}
+
+    local Window = Library.Window
+    local Folder = tostring(Info.Folder or "Octo")
+    local ConfigFolder = Folder .. "/configs"
+    local ThemeFolder = Folder .. "/themes"
+    local UIPath = Folder .. "/ui.json"
+    local IgnoreIndexes = typeof(Info.IgnoreIndexes) == "table" and Info.IgnoreIndexes or {}
+
+    --// Files \\--
+    local HasFS = typeof(writefile) == "function"
+        and typeof(readfile) == "function"
+        and typeof(isfile) == "function"
+        and typeof(isfolder) == "function"
+        and typeof(makefolder) == "function"
+        and typeof(listfiles) == "function"
+
+    if HasFS then
+        for _, Path in { Folder, ConfigFolder, ThemeFolder } do
+            if not isfolder(Path) then
+                pcall(makefolder, Path)
+            end
+        end
+    end
+
+    local function Write(Path: string, Text: string): boolean
+        return HasFS and pcall(writefile, Path, Text) or false
+    end
+
+    local function Read(Path: string): string?
+        if not HasFS or not isfile(Path) then
+            return nil
+        end
+
+        local Ok, Result = pcall(readfile, Path)
+        return Ok and Result or nil
+    end
+
+    local function ReadJSON(Path: string): any
+        local Text = Read(Path)
+        if not Text then
+            return nil
+        end
+
+        local Ok, Data = pcall(HttpService.JSONDecode, HttpService, Text)
+        return Ok and Data or nil
+    end
+
+    local function ListNames(Path: string): { string }
+        local Names = {}
+        if not HasFS then
+            return Names
+        end
+
+        local Ok, Files = pcall(listfiles, Path)
+        if not Ok then
+            return Names
+        end
+
+        for _, File in Files do
+            local Name = tostring(File):match("([^/\\]+)%.json$")
+            if Name then
+                table.insert(Names, Name)
+            end
+        end
+        table.sort(Names, function(A, B)
+            return A:lower() < B:lower()
+        end)
+
+        return Names
+    end
+
+    local function SafeName(Name: any): string
+        return (Trim(tostring(Name or "")):gsub("[^%w%-_ ]", ""))
+    end
+
+    local function Note(Title: string, Text: string)
+        Library:Notify({ Title = Title, Description = Text, Time = 3 })
+    end
+
+    --// UI state (remembered between sessions) \\--
+    local UIState = ReadJSON(UIPath) or {}
+    local SaveToken = 0
+    local function Remember(Key: string, Value: any)
+        UIState[Key] = Value
+
+        SaveToken += 1
+        local Token = SaveToken
+        task.delay(0.6, function()
+            if Token == SaveToken then
+                Write(UIPath, HttpService:JSONEncode(UIState))
+            end
+        end)
+    end
+
+    local Effects = {}
+    local function Bind(Key: string, Default: any, Setter: (any) -> ())
+        Effects[Key] = Setter
+
+        local Saved = UIState[Key]
+        if Saved == nil then
+            return Default
+        end
+
+        return Saved
+    end
+    local function Changed(Key: string)
+        return function(Value)
+            Effects[Key](Value)
+
+            --// multi dropdowns arrive as { [value] = true } \\--
+            if typeof(Value) == "table" and Value[1] == nil then
+                local List = {}
+                for Item, Active in Value do
+                    if Active then
+                        table.insert(List, Item)
+                    end
+                end
+                Value = List
+            end
+
+            Remember(Key, Value)
+        end
+    end
+
+    local Settings = {
+        Tab = Tab,
+        Pages = {},
+        Folder = Folder,
+    }
+    Library.SettingsTab = Settings
+
+    local function IsIgnored(Idx: any): boolean
+        return typeof(Idx) ~= "string" or Idx:sub(1, 5) == "Octo_" or table.find(IgnoreIndexes, Idx) ~= nil
+    end
+
+    --// Config (de)serialisation \\--
+    local function SerializeConfig()
+        local Data = {}
+
+        for Idx, Toggle in Toggles do
+            if not IsIgnored(Idx) then
+                Data[Idx] = { Type = "Toggle", Value = Toggle.Value }
+            end
+        end
+
+        for Idx, Option in Options do
+            if IsIgnored(Idx) then
+                continue
+            end
+
+            local OptionType = Option.Type
+            if OptionType == "Slider" or OptionType == "Input" then
+                Data[Idx] = { Type = OptionType, Value = Option.Value }
+            elseif OptionType == "RangeSlider" then
+                Data[Idx] = { Type = OptionType, Low = Option.Low, High = Option.High }
+            elseif OptionType == "Dropdown" and not Option.SpecialType then
+                if Option.Multi then
+                    local List = {}
+                    for Value, Active in Option.Value do
+                        if Active then
+                            table.insert(List, Value)
+                        end
+                    end
+
+                    Data[Idx] = { Type = OptionType, Multi = true, Value = List }
+                else
+                    Data[Idx] = { Type = OptionType, Value = Option.Value }
+                end
+            elseif OptionType == "KeyPicker" then
+                Data[Idx] = { Type = OptionType, Key = Option.Value, Mode = Option.Mode, Modifiers = Option.Modifiers }
+            elseif OptionType == "ColorPicker" then
+                Data[Idx] = { Type = OptionType, Hex = Option.Value:ToHex(), Transparency = Option.Transparency }
+            end
+        end
+
+        return Data
+    end
+
+    local function ApplyConfig(Data)
+        if typeof(Data) ~= "table" then
+            return
+        end
+
+        for Idx, Entry in Data do
+            if IsIgnored(Idx) or typeof(Entry) ~= "table" then
+                continue
+            end
+
+            local Object = if Entry.Type == "Toggle" then Toggles[Idx] else Options[Idx]
+            if not Object or Object.Type ~= Entry.Type then
+                continue
+            end
+
+            pcall(function()
+                local EntryType = Entry.Type
+                if EntryType == "Toggle" or EntryType == "Slider" or EntryType == "Input" then
+                    Object:SetValue(Entry.Value)
+                elseif EntryType == "RangeSlider" then
+                    Object:SetValue(Entry.Low, Entry.High)
+                elseif EntryType == "Dropdown" then
+                    if Entry.Multi then
+                        local Map = {}
+                        for _, Value in Entry.Value or {} do
+                            Map[Value] = true
+                        end
+
+                        Object:SetValue(Map)
+                    else
+                        Object:SetValue(Entry.Value)
+                    end
+                elseif EntryType == "KeyPicker" then
+                    Object:SetValue({ Entry.Key, Entry.Mode, Entry.Modifiers })
+                elseif EntryType == "ColorPicker" then
+                    Object:SetValueRGB(Color3.fromHex(Entry.Hex), Entry.Transparency)
+                end
+            end)
+        end
+    end
+
+    local function ConfigPath(Name: string): string
+        return ConfigFolder .. "/" .. Name .. ".json"
+    end
+
+    function Settings:SaveConfig(Name: string): boolean
+        Name = SafeName(Name)
+        if Name == "" then
+            return false
+        end
+
+        return Write(ConfigPath(Name), HttpService:JSONEncode(SerializeConfig()))
+    end
+
+    function Settings:LoadConfig(Name: string): boolean
+        local Data = ReadJSON(ConfigPath(SafeName(Name)))
+        if not Data then
+            return false
+        end
+
+        ApplyConfig(Data)
+        return true
+    end
+
+    function Settings:LoadAutoload(): boolean
+        local Name = Read(ConfigFolder .. "/autoload.txt")
+        if not Name or Trim(Name) == "" then
+            return false
+        end
+
+        return Settings:LoadConfig(Trim(Name))
+    end
+
+    --// Config page \\--
+    if Info.Config ~= false then
+        local Page = Tab:AddSubPage({ Name = "Config", Icon = "save", Tooltip = "Save and load your settings" })
+        Settings.Pages.Config = Page
+
+        local Box = Page:AddGroupbox({ Side = 1, Name = "Configs", IconName = "folder" })
+        local ShareBox = Page:AddGroupbox({ Side = 2, Name = "Share", IconName = "share-2" })
+
+        if not HasFS then
+            Box:AddLabel("<font color=\"#ff6b6b\">Your executor has no file functions, configs can't be saved.</font>", true)
+        end
+
+        Box:AddInput("Octo_Cfg_Name", { Text = "Config name", Placeholder = "my config" })
+        Box:AddDropdown("Octo_Cfg_List", {
+            Text = "Config list",
+            Values = ListNames(ConfigFolder),
+            AllowNull = true,
+            Searchable = true,
+        })
+
+        local AutoLabel
+        local function RefreshList()
+            Options.Octo_Cfg_List:SetValues(ListNames(ConfigFolder))
+            Options.Octo_Cfg_List:SetValue(nil)
+        end
+        local function Selected(): string?
+            local Name = Options.Octo_Cfg_List.Value
+            if not Name then
+                Note("Config", "Select a config first.")
+            end
+
+            return Name
+        end
+
+        Box:AddDivider()
+        Box:AddButton({
+            Text = "Create",
+            Func = function()
+                local Name = SafeName(Options.Octo_Cfg_Name.Value)
+                if Name == "" then
+                    return Note("Config", "Type a name first.")
+                end
+                if Read(ConfigPath(Name)) then
+                    return Note("Config", string.format("%q already exists.", Name))
+                end
+
+                Note("Config", Settings:SaveConfig(Name) and string.format("Created %q.", Name) or "Could not save the file.")
+                RefreshList()
+            end,
+        }):AddButton({
+            Text = "Load",
+            Func = function()
+                local Name = Selected()
+                if Name then
+                    Note("Config", Settings:LoadConfig(Name) and string.format("Loaded %q.", Name) or "Could not read the file.")
+                end
+            end,
+        })
+
+        Box:AddButton({
+            Text = "Overwrite",
+            DoubleClick = true,
+            Func = function()
+                local Name = Selected()
+                if Name then
+                    Note("Config", Settings:SaveConfig(Name) and string.format("Saved %q.", Name) or "Could not save the file.")
+                end
+            end,
+        }):AddButton({
+            Text = "Delete",
+            Risky = true,
+            DoubleClick = true,
+            Func = function()
+                local Name = Selected()
+                if Name and typeof(delfile) == "function" then
+                    pcall(delfile, ConfigPath(Name))
+                    Note("Config", string.format("Deleted %q.", Name))
+                    RefreshList()
+                end
+            end,
+        })
+
+        Box:AddButton({ Text = "Refresh list", Func = RefreshList })
+        Box:AddDivider("Autoload")
+
+        Box:AddButton({
+            Text = "Set as autoload",
+            Func = function()
+                local Name = Selected()
+                if Name then
+                    Write(ConfigFolder .. "/autoload.txt", Name)
+                    AutoLabel:SetText("Autoload: " .. Library:Copyable(Name))
+                end
+            end,
+        }):AddButton({
+            Text = "Reset",
+            Func = function()
+                Write(ConfigFolder .. "/autoload.txt", "")
+                AutoLabel:SetText("Autoload: none")
+            end,
+        })
+
+        local CurrentAuto = Read(ConfigFolder .. "/autoload.txt")
+        AutoLabel = Box:AddLabel(
+            (CurrentAuto and Trim(CurrentAuto) ~= "") and ("Autoload: " .. Library:Copyable(Trim(CurrentAuto))) or "Autoload: none"
+        )
+
+        ShareBox:AddButton({
+            Text = "Copy config to clipboard",
+            Func = function()
+                if not setclipboard then
+                    return Note("Config", "Your executor has no clipboard function.")
+                end
+
+                setclipboard(HttpService:JSONEncode(SerializeConfig()))
+                Note("Config", "Copied the current settings.")
+            end,
+        })
+        ShareBox:AddDivider()
+        ShareBox:AddInput("Octo_Cfg_Import", { Text = "Paste config JSON", Placeholder = "{ ... }", Finished = true })
+        ShareBox:AddButton({
+            Text = "Import pasted config",
+            Func = function()
+                local Ok, Data = pcall(HttpService.JSONDecode, HttpService, Options.Octo_Cfg_Import.Value)
+                if not Ok or typeof(Data) ~= "table" then
+                    return Note("Config", "That is not a valid config.")
+                end
+
+                ApplyConfig(Data)
+                Note("Config", "Imported.")
+            end,
+        })
+        ShareBox:AddDivider()
+        ShareBox:AddLabel("Configs save every toggle, slider, dropdown, input, keybind and color picker that has an index.", true)
+    end
+
+    --// Theme page \\--
+    if Info.Theme ~= false then
+        local Page = Tab:AddSubPage({ Name = "Theme", Icon = "palette", Tooltip = "Colors, font and presets" })
+        Settings.Pages.Theme = Page
+
+        local ThemeKeys = {
+            { "BackgroundColor", "Background" },
+            { "MainColor", "Main" },
+            { "AccentColor", "Accent" },
+            { "OutlineColor", "Outline" },
+            { "FontColor", "Text" },
+        }
+        local Presets = {
+            Default = { BackgroundColor = "0f0f0f", MainColor = "191919", AccentColor = "7d55ff", OutlineColor = "282828", FontColor = "ffffff" },
+            Vitality = { BackgroundColor = "0e0b0d", MainColor = "181215", AccentColor = "e0284f", OutlineColor = "2a2024", FontColor = "ffffff" },
+            Ocean = { BackgroundColor = "0b1218", MainColor = "111b24", AccentColor = "3aa0ff", OutlineColor = "1e2d3b", FontColor = "e8f3ff" },
+            Mint = { BackgroundColor = "0c1210", MainColor = "131c18", AccentColor = "2ee6a6", OutlineColor = "1f2e28", FontColor = "eafff6" },
+            Rose = { BackgroundColor = "140d12", MainColor = "1d1319", AccentColor = "ff6ba6", OutlineColor = "2e1f29", FontColor = "fff0f6" },
+            Amber = { BackgroundColor = "130f0a", MainColor = "1c1610", AccentColor = "ffb02e", OutlineColor = "2d2418", FontColor = "fff6e5" },
+            Light = { BackgroundColor = "f2f2f4", MainColor = "ffffff", AccentColor = "6d4aff", OutlineColor = "d4d4da", FontColor = "1b1b1f", Light = true },
+        }
+        local PresetNames = { "Default", "Vitality", "Ocean", "Mint", "Rose", "Amber", "Light" }
+        local FontNames = { "Code", "RobotoMono", "Roboto", "Ubuntu", "Gotham", "GothamMedium", "SourceSans", "Arimo", "Nunito" }
+
+        local Applying = true
+        local FontName = "Code"
+
+        local function RefreshTheme()
+            Library:UpdateColorsUsingRegistry()
+
+            for _, Toggle in Toggles do
+                if Toggle.UpdateColors then
+                    pcall(Toggle.UpdateColors, Toggle)
+                end
+            end
+            for _, Option in Options do
+                if Option.UpdateColors then
+                    pcall(Option.UpdateColors, Option)
+                end
+            end
+            for _, Button in Buttons do
+                if Button.UpdateColors then
+                    pcall(Button.UpdateColors, Button)
+                end
+            end
+
+            if Library.Watermark then
+                Library.Watermark:Refresh()
+            end
+        end
+
+        local ColorBox = Page:AddGroupbox({ Side = 1, Name = "Colors", IconName = "palette" })
+        for _, Entry in ThemeKeys do
+            local Key = Entry[1]
+            ColorBox:AddLabel(Entry[2]):AddColorPicker("Octo_Theme_" .. Key, {
+                Default = Library.Scheme[Key],
+                Title = Entry[2],
+                Callback = function(Color)
+                    Library.Scheme[Key] = Color
+                    if not Applying then
+                        RefreshTheme()
+                    end
+                end,
+            })
+        end
+
+        ColorBox:AddDivider()
+        ColorBox:AddToggle("Octo_Theme_Light", {
+            Text = "Light theme shading",
+            Default = Library.IsLightTheme,
+            Tooltip = "Changes how hover / highlight shades are calculated",
+            Callback = function(Value)
+                Library.IsLightTheme = Value
+                if not Applying then
+                    RefreshTheme()
+                end
+            end,
+        })
+        ColorBox:AddDropdown("Octo_Theme_Font", {
+            Text = "Font",
+            Values = FontNames,
+            Default = FontName,
+            Callback = function(Value)
+                if Value and Enum.Font[Value] then
+                    FontName = Value
+                    Library:SetFont(Enum.Font[Value])
+                end
+            end,
+        })
+        ColorBox:AddSlider("Octo_Theme_Radius", {
+            Text = "Corner radius",
+            Default = Library.CornerRadius,
+            Min = 0,
+            Max = 20,
+            Rounding = 0,
+            Callback = function(Value)
+                if Window then
+                    Window:SetCornerRadius(Value)
+                end
+            end,
+        })
+
+        local function ApplyThemeData(Data)
+            if typeof(Data) ~= "table" then
+                return
+            end
+
+            Applying = true
+            for _, Entry in ThemeKeys do
+                local Hex = Data.Colors and Data.Colors[Entry[1]]
+                if typeof(Hex) == "string" then
+                    pcall(function()
+                        Options["Octo_Theme_" .. Entry[1]]:SetValueRGB(Color3.fromHex(Hex))
+                    end)
+                end
+            end
+
+            if typeof(Data.Font) == "string" then
+                Options.Octo_Theme_Font:SetValue(Data.Font)
+            end
+            if typeof(Data.CornerRadius) == "number" then
+                Options.Octo_Theme_Radius:SetValue(Data.CornerRadius)
+            end
+            Toggles.Octo_Theme_Light:SetValue(Data.Light == true)
+
+            Applying = false
+            RefreshTheme()
+        end
+
+        local function GatherTheme()
+            local Colors = {}
+            for _, Entry in ThemeKeys do
+                Colors[Entry[1]] = Library.Scheme[Entry[1]]:ToHex()
+            end
+
+            return { Colors = Colors, Font = FontName, Light = Library.IsLightTheme, CornerRadius = Library.CornerRadius }
+        end
+
+        local function ThemePath(Name: string): string
+            return ThemeFolder .. "/" .. Name .. ".json"
+        end
+
+        local FileBox = Page:AddGroupbox({ Side = 2, Name = "Presets & files", IconName = "swatch-book" })
+        FileBox:AddDropdown("Octo_Theme_Preset", {
+            Text = "Preset",
+            Values = PresetNames,
+            AllowNull = true,
+            Callback = function(Value)
+                local Preset = Value and Presets[Value]
+                if not Preset then
+                    return
+                end
+
+                local Colors = {}
+                for _, Entry in ThemeKeys do
+                    Colors[Entry[1]] = Preset[Entry[1]]
+                end
+
+                ApplyThemeData({ Colors = Colors, Light = Preset.Light == true, Font = FontName, CornerRadius = Library.CornerRadius })
+            end,
+        })
+
+        FileBox:AddDivider("Saved themes")
+        FileBox:AddInput("Octo_Theme_Name", { Text = "Theme name", Placeholder = "my theme" })
+        FileBox:AddDropdown("Octo_Theme_List", { Text = "Theme list", Values = ListNames(ThemeFolder), AllowNull = true })
+
+        local DefaultLabel
+        local function RefreshThemes()
+            Options.Octo_Theme_List:SetValues(ListNames(ThemeFolder))
+            Options.Octo_Theme_List:SetValue(nil)
+        end
+        local function SelectedTheme(): string?
+            local Name = Options.Octo_Theme_List.Value
+            if not Name then
+                Note("Theme", "Select a theme first.")
+            end
+
+            return Name
+        end
+
+        FileBox:AddButton({
+            Text = "Save",
+            Func = function()
+                local Name = SafeName(Options.Octo_Theme_Name.Value)
+                if Name == "" then
+                    Name = Options.Octo_Theme_List.Value or ""
+                end
+                if Name == "" then
+                    return Note("Theme", "Type a name first.")
+                end
+
+                Note("Theme", Write(ThemePath(Name), HttpService:JSONEncode(GatherTheme())) and string.format("Saved %q.", Name) or "Could not save the file.")
+                RefreshThemes()
+            end,
+        }):AddButton({
+            Text = "Load",
+            Func = function()
+                local Name = SelectedTheme()
+                if Name then
+                    local Data = ReadJSON(ThemePath(Name))
+                    if Data then
+                        ApplyThemeData(Data)
+                    else
+                        Note("Theme", "Could not read the file.")
+                    end
+                end
+            end,
+        })
+
+        FileBox:AddButton({
+            Text = "Delete",
+            Risky = true,
+            DoubleClick = true,
+            Func = function()
+                local Name = SelectedTheme()
+                if Name and typeof(delfile) == "function" then
+                    pcall(delfile, ThemePath(Name))
+                    RefreshThemes()
+                end
+            end,
+        }):AddButton({
+            Text = "Set default",
+            Func = function()
+                local Name = SelectedTheme()
+                if Name then
+                    Write(ThemeFolder .. "/default.txt", Name)
+                    DefaultLabel:SetText("Default theme: " .. Library:Copyable(Name))
+                end
+            end,
+        })
+
+        local CurrentDefault = Read(ThemeFolder .. "/default.txt")
+        DefaultLabel = FileBox:AddLabel(
+            (CurrentDefault and Trim(CurrentDefault) ~= "") and ("Default theme: " .. Library:Copyable(Trim(CurrentDefault))) or "Default theme: none"
+        )
+
+        Applying = false
+        if CurrentDefault and Trim(CurrentDefault) ~= "" then
+            ApplyThemeData(ReadJSON(ThemePath(Trim(CurrentDefault))))
+        end
+    end
+
+    --// UI page \\--
+    if Info.UI ~= false then
+        local Page = Tab:AddSubPage({ Name = "UI", Icon = "monitor", Tooltip = "Menu, layout and overlays" })
+        Settings.Pages.UI = Page
+
+        local function GetWatermark()
+            return Library.Watermark
+                or Library:CreateWatermark({ Title = Window and Window.WindowInfo and Window.WindowInfo.Title or "Octo" })
+        end
+
+        local Anim = { "ToggleWindow", "TabSwitch", "Groupbox", "Dropdown", "KeyPicker" }
+
+        local Box = Page:AddGroupbox({ Side = 1, Name = "Interface", IconName = "app-window" })
+
+        Box:AddLabel("Menu keybind"):AddKeyPicker("Octo_MenuKey", {
+            Default = "RightControl",
+            Mode = "Toggle",
+            NoUI = true,
+            Text = "Menu keybind",
+        })
+        Library.ToggleKeybind = Options.Octo_MenuKey
+
+        Box:AddToggle("Octo_UI_Toolbar", {
+            Text = "Top toolbar",
+            Default = Bind("Octo_UI_Toolbar", true, function(Value)
+                if Library.Toolbar then
+                    Library.Toolbar:SetVisible(Value)
+                end
+            end),
+            Callback = Changed("Octo_UI_Toolbar"),
+        })
+        Box:AddToggle("Octo_UI_Keybinds", {
+            Text = "Keybind list",
+            Default = Bind("Octo_UI_Keybinds", false, function(Value)
+                Library:SetKeybindListVisible(Value)
+            end),
+            Callback = Changed("Octo_UI_Keybinds"),
+        })
+        Box:AddToggle("Octo_UI_Cursor", {
+            Text = "Custom cursor",
+            Default = Bind("Octo_UI_Cursor", Library.ShowCustomCursor, function(Value)
+                Library.ShowCustomCursor = Value
+            end),
+            Callback = Changed("Octo_UI_Cursor"),
+        })
+        Box:AddDropdown("Octo_UI_Animations", {
+            Text = "Animations",
+            Values = Anim,
+            Multi = true,
+            AllowNull = true,
+            Default = Bind("Octo_UI_Animations", {}, function(Value)
+                local Map = {}
+                if typeof(Value) == "table" then
+                    for Key, Item in Value do
+                        if typeof(Key) == "number" then
+                            Map[Item] = true
+                        elseif Item then
+                            Map[Key] = true
+                        end
+                    end
+                end
+
+                for _, Name in Anim do
+                    Library.Animations[Name] = Map[Name] == true
+                end
+            end),
+            Callback = Changed("Octo_UI_Animations"),
+        })
+        Box:AddSlider("Octo_UI_DPI", {
+            Text = "DPI scale",
+            Default = Bind("Octo_UI_DPI", 100, function(Value)
+                Library:SetDPIScale(Value)
+            end),
+            Min = 50,
+            Max = 200,
+            Rounding = 0,
+            Suffix = "%",
+            Callback = Changed("Octo_UI_DPI"),
+        })
+
+        Box:AddDivider("Notifications")
+        Box:AddDropdown("Octo_UI_NotifySide", {
+            Text = "Side",
+            Values = { "Left", "Right" },
+            Default = Bind("Octo_UI_NotifySide", Library.NotifySide, function(Value)
+                if Value then
+                    Library:SetNotifySide(Value)
+                end
+            end),
+            Callback = Changed("Octo_UI_NotifySide"),
+        })
+        Box:AddSlider("Octo_UI_MaxNotify", {
+            Text = "Max on screen (0 = unlimited)",
+            Default = Bind("Octo_UI_MaxNotify", Library.MaxNotifications, function(Value)
+                Library.MaxNotifications = Value
+            end),
+            Min = 0,
+            Max = 12,
+            Rounding = 0,
+            Callback = Changed("Octo_UI_MaxNotify"),
+        })
+        Box:AddToggle("Octo_UI_GroupNotify", {
+            Text = "Stack identical notifications",
+            Default = Bind("Octo_UI_GroupNotify", Library.GroupNotifications, function(Value)
+                Library.GroupNotifications = Value
+            end),
+            Callback = Changed("Octo_UI_GroupNotify"),
+        })
+        Box:AddButton({
+            Text = "Test notification",
+            Func = function()
+                Library:Notify({ Title = "Octo", Description = "This is a test notification.", Time = 3, Icon = "bell" })
+            end,
+        })
+
+        local LayoutBox = Page:AddGroupbox({ Side = 2, Name = "Layout", IconName = "layout-dashboard" })
+        LayoutBox:AddSlider("Octo_UI_TabHeight", {
+            Text = "Tab button height",
+            Default = Bind("Octo_UI_TabHeight", 40, function(Value)
+                if Window then
+                    Window:SetTabSize(Value)
+                end
+            end),
+            Min = 28,
+            Max = 64,
+            Rounding = 0,
+            Suffix = "px",
+            Callback = Changed("Octo_UI_TabHeight"),
+        })
+        LayoutBox:AddSlider("Octo_UI_TabText", {
+            Text = "Tab text size",
+            Default = Bind("Octo_UI_TabText", 16, function(Value)
+                if Window then
+                    Window:SetTabButtonsStyle({ TextSize = Value })
+                end
+            end),
+            Min = 10,
+            Max = 24,
+            Rounding = 0,
+            Callback = Changed("Octo_UI_TabText"),
+        })
+        LayoutBox:AddDropdown("Octo_UI_SubPageStyle", {
+            Text = "Sub page style",
+            Values = { "Pill", "Underline", "Flat" },
+            Default = Bind("Octo_UI_SubPageStyle", "Pill", function(Value)
+                if Window and Value then
+                    Window:SetSubPageStyle({ Style = Value })
+                end
+            end),
+            Callback = Changed("Octo_UI_SubPageStyle"),
+        })
+        LayoutBox:AddToggle("Octo_UI_SearchCollapse", {
+            Text = "Collapse search bar",
+            Default = Bind("Octo_UI_SearchCollapse", true, function(Value)
+                if Window then
+                    Window:SetSearchbarCollapsible(Value)
+                end
+            end),
+            Callback = Changed("Octo_UI_SearchCollapse"),
+        })
+
+        LayoutBox:AddDivider("Watermark")
+        LayoutBox:AddToggle("Octo_UI_Watermark", {
+            Text = "Show watermark",
+            Default = Bind("Octo_UI_Watermark", Library.Watermark ~= nil and Library.Watermark.Holder.Visible or false, function(Value)
+                GetWatermark():SetVisible(Value)
+            end),
+            Callback = Changed("Octo_UI_Watermark"),
+        })
+
+        local Segments = {
+            { "fps", "FPS", true },
+            { "ping", "Ping", true },
+            { "player", "Player", false },
+            { "game", "Game name", false },
+            { "time", "Clock", false },
+        }
+        local WatermarkRow
+        for Index, Segment in Segments do
+            local Id = Segment[1]
+            if Index % 2 == 1 then
+                WatermarkRow = LayoutBox:AddRow()
+            end
+
+            WatermarkRow:AddToggle("Octo_UI_WM_" .. Id, {
+                Text = Segment[2],
+                Default = Bind("Octo_UI_WM_" .. Id, Segment[3], function(Value)
+                    if Library.Watermark then
+                        Library.Watermark:SetSegmentVisible(Id, Value)
+                    end
+                end),
+                Callback = Changed("Octo_UI_WM_" .. Id),
+            })
+        end
+
+        LayoutBox:AddDivider()
+        LayoutBox:AddButton({
+            Text = "Unload",
+            Risky = true,
+            DoubleClick = true,
+            Func = function()
+                Library:Unload()
+            end,
+        })
+
+        --// apply the remembered values \\--
+        for Key, Setter in Effects do
+            if UIState[Key] ~= nil then
+                pcall(Setter, UIState[Key])
+            end
+        end
+    end
+
+    if Library.Toolbar and Library.Toolbar.SettingsButton then
+        Library.Toolbar.SettingsButton:SetVisible(true)
+    end
+
+    Settings:LoadAutoload()
+    return Settings
+end
+
 local function OnPlayerChange()
     if Library.Unloaded then
         return
@@ -18147,6 +20078,9 @@ function Library:Unload()
 
     Library.Toggle = function(...) end
     Library.ScreenGui = nil
+    Library.Toolbar = nil
+    Library.Watermark = nil
+    Library.SettingsTab = nil
     Library.Floats = nil
     Library.Overlay = nil
     Library.WindowContainer = nil
