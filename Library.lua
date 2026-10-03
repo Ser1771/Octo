@@ -4524,7 +4524,7 @@ function Library:AddContextMenu(
             BottomImage = "rbxasset://textures/ui/Scroll/scroll-middle.png",
             CanvasSize = UDim2.fromOffset(0, 0),
             ScrollBarImageColor3 = "OutlineColor",
-            ScrollBarThickness = List == 2 and 2 or 0,
+            ScrollBarThickness = 0,
             Size = typeof(Size) == "function" and Size() or Size,
             TopImage = "rbxasset://textures/ui/Scroll/scroll-middle.png",
             Visible = false,
@@ -11039,7 +11039,7 @@ do
                 CanvasSize = UDim2.fromOffset(0, 0),
                 LayoutOrder = 2,
                 ScrollBarImageColor3 = "OutlineColor",
-                ScrollBarThickness = 3,
+                ScrollBarThickness = 0,
                 ScrollingDirection = Enum.ScrollingDirection.Y,
                 Size = UDim2.new(1, 0, 0, GridHeight),
                 Parent = Dialog.Container,
@@ -11053,7 +11053,7 @@ do
             New("UIPadding", {
                 PaddingBottom = UDim.new(0, 3),
                 PaddingLeft = UDim.new(0, 3),
-                PaddingRight = UDim.new(0, 7),
+                PaddingRight = UDim.new(0, 3),
                 PaddingTop = UDim.new(0, 3),
                 Parent = GridScroll,
             })
@@ -15587,7 +15587,7 @@ function Library:CreateWindow(WindowInfo)
                 BorderSizePixel = 0,
                 Size = UDim2.fromScale(1, 1),
                 CanvasSize = UDim2.new(0, 0, 0, 0),
-                ScrollBarThickness = 3,
+                ScrollBarThickness = 0,
                 ScrollingDirection = Enum.ScrollingDirection.Y,
                 Parent = WarningBox,
             })
@@ -18694,7 +18694,7 @@ function Library:CreateLoading(LoadingInfo)
         BorderSizePixel = 0,
         CanvasSize = UDim2.new(0, 0, 0, 0),
         Size = UDim2.fromScale(1, 1),
-        ScrollBarThickness = 2,
+        ScrollBarThickness = 0,
         ScrollBarImageColor3 = "OutlineColor",
         Parent = SideBar,
     })
@@ -19213,8 +19213,10 @@ function Library:SetSettingsTab(Tab, Info)
     end
 
     local Effects = {}
+    local Defaults = {}
     local function Bind(Key: string, Default: any, Setter: (any) -> ())
         Effects[Key] = Setter
+        Defaults[Key] = Default
 
         local Saved = UIState[Key]
         if Saved == nil then
@@ -19815,16 +19817,16 @@ function Library:SetSettingsTab(Tab, Info)
             end),
             Callback = Changed("Octo_UI_Animations"),
         })
-        Box:AddSlider("Octo_UI_DPI", {
+        Box:AddDropdown("Octo_UI_DPIScale", {
             Text = "DPI scale",
-            Default = Bind("Octo_UI_DPI", 100, function(Value)
-                Library:SetDPIScale(Value)
+            Values = { "50%", "75%", "100%", "125%", "150%", "175%", "200%" },
+            Default = Bind("Octo_UI_DPIScale", "100%", function(Value)
+                local Percent = tonumber(tostring(Value):match("%d+"))
+                if Percent then
+                    Library:SetDPIScale(Percent)
+                end
             end),
-            Min = 50,
-            Max = 200,
-            Rounding = 0,
-            Suffix = "%",
-            Callback = Changed("Octo_UI_DPI"),
+            Callback = Changed("Octo_UI_DPIScale"),
         })
 
         Box:AddDivider("Notifications")
@@ -19943,6 +19945,34 @@ function Library:SetSettingsTab(Tab, Info)
         end
 
         LayoutBox:AddDivider()
+        LayoutBox:AddButton({
+            Text = "Reset UI settings",
+            DoubleClick = true,
+            Tooltip = "Puts every option of this page back to its default",
+            Func = function()
+                for Key, Default in Defaults do
+                    local Object = Toggles[Key] or Options[Key]
+                    if Object then
+                        pcall(function()
+                            Object:SetValue(Default)
+                        end)
+                    end
+                end
+
+                if Options.Octo_MenuKey then
+                    pcall(function()
+                        Options.Octo_MenuKey:SetValue({ "RightControl", "Toggle", {} })
+                    end)
+                end
+
+                --// forget the saved values (also cancels a pending save) \--
+                SaveToken += 1
+                table.clear(UIState)
+                Write(UIPath, "{}")
+
+                Note("UI", "UI settings were reset.")
+            end,
+        })
         LayoutBox:AddButton({
             Text = "Unload",
             Risky = true,
