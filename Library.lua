@@ -391,6 +391,7 @@ local Templates = {
         IconSize = UDim2.fromOffset(30, 30),
 
         AutoShow = true,
+        AccentLine = true, -- thin accent line along the top of the window
         Center = true,
         Resizable = true,
         AlwaysOnTop = false,
@@ -453,12 +454,12 @@ local Templates = {
         TabButtonsStyle = {
             Height = 40, -- tab button height
             TextSize = 16, -- tab button text size
-            Gap = 0,
-            Padding = 0,
-            CornerRadius = 0,
-            Indicator = false,
-            IndicatorWidth = 2,
-            IndicatorHeight = 20,
+            Gap = 2,
+            Padding = 6,
+            CornerRadius = 6,
+            Indicator = true,
+            IndicatorWidth = 3,
+            IndicatorHeight = 18,
         },
 
         --// Sub Pages \\--
@@ -2487,7 +2488,7 @@ local function LayoutCopyLabel(Label)
                 Image = Library.CopyTextIcon,
                 ImageColor3 = Library.CopyTextColor,
                 ImageTransparency = 0.15,
-                Position = UDim2.fromOffset(EndX + 1, LineTop(EndLine) + LineHeight / 2),
+                Position = UDim2.fromOffset(EndX + 3, LineTop(EndLine) + LineHeight / 2),
                 Size = UDim2.fromOffset(IconSize, IconSize),
                 ZIndex = Label.ZIndex + 2,
                 Parent = Label,
@@ -9280,12 +9281,13 @@ do
             })
         end
 
+        --// Compact: value text inside a 15px bar. Default: value on the title row + thin pill track \\--
         local Bar = New("TextButton", {
             Active = not Slider.Disabled,
             AnchorPoint = Vector2.new(0, 1),
             BackgroundColor3 = "MainColor",
-            Position = UDim2.fromScale(0, 1),
-            Size = UDim2.new(1, 0, 0, 15),
+            Position = Info.Compact and UDim2.fromScale(0, 1) or UDim2.new(0, 0, 1, -3),
+            Size = UDim2.new(1, 0, 0, Info.Compact and 15 or 8),
             Text = "",
             Parent = Holder,
         })
@@ -9293,13 +9295,20 @@ do
             Color = "OutlineColor",
             Parent = Bar,
         })
-        table.insert(
-            Library.Corners,
+        if Info.Compact then
+            table.insert(
+                Library.Corners,
+                New("UICorner", {
+                    CornerRadius = UDim.new(0, Library.CornerRadius / 2),
+                    Parent = Bar,
+                })
+            )
+        else
             New("UICorner", {
-                CornerRadius = UDim.new(0, Library.CornerRadius / 2),
+                CornerRadius = UDim.new(1, 0),
                 Parent = Bar,
             })
-        )
+        end
 
         local Fill = New("Frame", {
             BackgroundColor3 = "AccentColor",
@@ -9307,13 +9316,27 @@ do
             ZIndex = Bar.ZIndex + 1,
             Parent = Bar,
         })
+        if Info.Compact then
+            table.insert(
+                Library.Corners,
+                New("UICorner", {
+                    CornerRadius = UDim.new(0, Library.CornerRadius / 2),
+                    Parent = Fill,
+                })
+            )
+        else
+            New("UICorner", {
+                CornerRadius = UDim.new(1, 0),
+                Parent = Fill,
+            })
+        end
 
         local function CreateHandle()
             local Handle = New("Frame", {
                 AnchorPoint = Vector2.new(0.5, 0.5),
                 BackgroundColor3 = "FontColor",
                 Position = UDim2.fromScale(0, 0.5),
-                Size = UDim2.new(0, 4, 1, 4),
+                Size = Info.Compact and UDim2.new(0, 4, 1, 4) or UDim2.fromOffset(12, 12),
                 ZIndex = Bar.ZIndex + 2,
                 Parent = Bar,
             })
@@ -9321,52 +9344,75 @@ do
                 Color = "DarkColor",
                 Parent = Handle,
             })
-            table.insert(
-                Library.Corners,
+            if Info.Compact then
+                table.insert(
+                    Library.Corners,
+                    New("UICorner", {
+                        CornerRadius = UDim.new(0, Library.CornerRadius / 2),
+                        Parent = Handle,
+                    })
+                )
+            else
                 New("UICorner", {
-                    CornerRadius = UDim.new(0, Library.CornerRadius / 2),
+                    CornerRadius = UDim.new(1, 0),
                     Parent = Handle,
                 })
-            )
+            end
 
             return Handle
         end
         local LowHandle = CreateHandle()
         local HighHandle = CreateHandle()
 
+        local TextParent = Info.Compact and Bar or Holder
+        local TextAnchor = Info.Compact and Vector2.new(0, 0) or Vector2.new(1, 0)
+        local TextPosition = Info.Compact and UDim2.fromScale(0, 0) or UDim2.fromScale(1, 0)
+        local TextSize = Info.Compact and UDim2.fromScale(1, 1) or UDim2.new(0.6, 0, 0, 14)
+        local TextAlignment = Info.Compact and Enum.TextXAlignment.Center or Enum.TextXAlignment.Right
+
         local DisplayLabel = New("TextLabel", {
+            AnchorPoint = TextAnchor,
             BackgroundTransparency = 1,
-            Size = UDim2.fromScale(1, 1),
+            Position = TextPosition,
+            Size = TextSize,
             Text = "",
             TextSize = 14,
+            TextXAlignment = TextAlignment,
             ZIndex = Bar.ZIndex + 3,
-            Parent = Bar,
+            Parent = TextParent,
         })
-        New("UIStroke", {
-            ApplyStrokeMode = Enum.ApplyStrokeMode.Contextual,
-            Color = "DarkColor",
-            LineJoinMode = Enum.LineJoinMode.Miter,
-            Parent = DisplayLabel,
-        })
-
-        local InputTextBox
-        if Info.AllowRightClickInput then
-            InputTextBox = New("TextBox", {
-                BackgroundTransparency = 1,
-                ClearTextOnFocus = false,
-                Size = UDim2.fromScale(1, 1),
-                Text = "",
-                TextSize = 14,
-                Visible = false,
-                ZIndex = Bar.ZIndex + 4,
-                Parent = Bar,
-            })
+        if Info.Compact then
             New("UIStroke", {
                 ApplyStrokeMode = Enum.ApplyStrokeMode.Contextual,
                 Color = "DarkColor",
                 LineJoinMode = Enum.LineJoinMode.Miter,
-                Parent = InputTextBox,
+                Parent = DisplayLabel,
             })
+        end
+
+        local InputTextBox
+        if Info.AllowRightClickInput then
+            InputTextBox = New("TextBox", {
+                AnchorPoint = TextAnchor,
+                BackgroundTransparency = 1,
+                ClearTextOnFocus = false,
+                Position = TextPosition,
+                Size = TextSize,
+                Text = "",
+                TextSize = 14,
+                TextXAlignment = TextAlignment,
+                Visible = false,
+                ZIndex = Bar.ZIndex + 4,
+                Parent = TextParent,
+            })
+            if Info.Compact then
+                New("UIStroke", {
+                    ApplyStrokeMode = Enum.ApplyStrokeMode.Contextual,
+                    Color = "DarkColor",
+                    LineJoinMode = Enum.LineJoinMode.Miter,
+                    Parent = InputTextBox,
+                })
+            end
         end
 
         local function ToScale(Value: number): number
@@ -14266,6 +14312,26 @@ function Library:CreateWindow(WindowInfo)
             Size = UDim2.new(1, 0, 0, 1),
         })
 
+        if WindowInfo.AccentLine ~= false then
+            local TopAccent = New("Frame", {
+                AnchorPoint = Vector2.new(0.5, 0),
+                BackgroundColor3 = "AccentColor",
+                Position = UDim2.fromScale(0.5, 0),
+                Size = UDim2.new(1, -WindowInfo.CornerRadius * 2, 0, 1),
+                ZIndex = 5,
+                Parent = MainFrame,
+            })
+            New("UIGradient", {
+                Transparency = NumberSequence.new({
+                    NumberSequenceKeypoint.new(0, 1),
+                    NumberSequenceKeypoint.new(0.3, 0.15),
+                    NumberSequenceKeypoint.new(0.7, 0.15),
+                    NumberSequenceKeypoint.new(1, 1),
+                }),
+                Parent = TopAccent,
+            })
+        end
+
         DividerLine = New("Frame", {
             BackgroundColor3 = "OutlineColor",
             Position = UDim2.fromOffset(InitialLeftWidth, 0),
@@ -14639,6 +14705,10 @@ function Library:CreateWindow(WindowInfo)
 
         --// Search bar collapse (icon only while unfocused and empty) \\--
         SearchCollapsed = WindowInfo.SearchbarCollapsible == true
+        if SearchCollapsed then
+            SearchBox.BackgroundTransparency = 1
+            SearchBoxStroke.Transparency = 1
+        end
         local SearchTween
         SetSearchCollapsed = function(Collapsed: boolean)
             if WindowInfo.SearchbarCollapsible ~= true then
@@ -14656,7 +14726,25 @@ function Library:CreateWindow(WindowInfo)
                 Size = Collapsed and UDim2.new(0, WindowInfo.SearchbarCollapsedWidth, 1, 0) or WindowInfo.SearchbarSize,
             })
             SearchTween:Play()
+
+            TweenService:Create(SearchBox, Library.DropdownTransitionInfo, {
+                BackgroundTransparency = Collapsed and 1 or 0,
+            }):Play()
+            TweenService:Create(SearchBoxStroke, Library.DropdownTransitionInfo, {
+                Transparency = Collapsed and 1 or 0,
+            }):Play()
         end
+
+        Library:GiveSignal(SearchBox.MouseEnter:Connect(function()
+            if SearchCollapsed then
+                TweenService:Create(SearchBox, Library.TweenInfo, { BackgroundTransparency = 0.5 }):Play()
+            end
+        end))
+        Library:GiveSignal(SearchBox.MouseLeave:Connect(function()
+            if SearchCollapsed then
+                TweenService:Create(SearchBox, Library.TweenInfo, { BackgroundTransparency = 1 }):Play()
+            end
+        end))
 
         Library:GiveSignal(SearchBox.Focused:Connect(function()
             SetSearchCollapsed(false)
@@ -16191,18 +16279,18 @@ function Library:CreateWindow(WindowInfo)
                         AnchorPoint = Vector2.new(0, 0.5),
                         ImageColor3 = BoxIcon.Custom and "WhiteColor" or "AccentColor",
                         Position = UDim2.fromScale(0, 0.5),
-                        Size = UDim2.fromOffset(22, 22),
+                        Size = UDim2.fromOffset(18, 18),
                         Parent = GroupboxTop,
                     })
                     Library:ApplyLucideIcon(GroupboxHeaderIcon, BoxIcon)
                 end
 
-                local RightInset = if Info.DisableCollapsing ~= true then 22 else 0
+                local RightInset = if Info.DisableCollapsing ~= true then 20 else 0
                 local TextsFrame = New("Frame", {
                     AutomaticSize = Enum.AutomaticSize.Y,
                     BackgroundTransparency = 1,
-                    Position = UDim2.fromOffset(BoxIcon and 24 or 0, 0),
-                    Size = UDim2.new(1, -RightInset - (BoxIcon and 24 or 0), 0, 0),
+                    Position = UDim2.fromOffset(BoxIcon and 22 or 0, 0),
+                    Size = UDim2.new(1, -RightInset - (BoxIcon and 22 or 0), 0, 0),
                     Parent = GroupboxTop,
                 })
                 New("UIListLayout", {
@@ -16250,7 +16338,7 @@ function Library:CreateWindow(WindowInfo)
                     BackgroundTransparency = 1,
                     ImageColor3 = "WhiteColor",
                     Position = UDim2.fromScale(1, 0.5),
-                    Size = UDim2.fromOffset(22, 22),
+                    Size = UDim2.fromOffset(18, 18),
                     Parent = GroupboxTop,
                 })
                 if ArrowIcon then
@@ -16260,6 +16348,15 @@ function Library:CreateWindow(WindowInfo)
                 GroupboxLine = Library:MakeLine(GroupboxHolder, {
                     LayoutOrder = 1,
                     Size = UDim2.new(1, 0, 0, 1),
+                })
+                New("UIGradient", {
+                    Transparency = NumberSequence.new({
+                        NumberSequenceKeypoint.new(0, 1),
+                        NumberSequenceKeypoint.new(0.12, 0.1),
+                        NumberSequenceKeypoint.new(0.88, 0.1),
+                        NumberSequenceKeypoint.new(1, 1),
+                    }),
+                    Parent = GroupboxLine,
                 })
 
                 GroupboxContainer = New("ScrollingFrame", {
