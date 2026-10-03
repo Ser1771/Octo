@@ -271,6 +271,7 @@ local Library = {
     DraggableElements = {},
 
     --// Pop Out \\--
+    GroupboxDrag = true, -- drag a groupbox header to float it (Library:SetGroupboxDrag)
     PopOutSnapDistance = 80,
     PopOutDragThreshold = 8,
     PopOutHoldTime = 0.15,
@@ -282,17 +283,17 @@ local Library = {
     OriginalMinSize = Vector2.new(480, 360),
     MinSize = Vector2.new(480, 360),
     DPIScale = 1,
-    CornerRadius = 4,
+    CornerRadius = 10,
 
     --// Scheme \\--
     IsLightTheme = false,
     Scheme = {
-        BackgroundColor = Color3.fromRGB(15, 15, 15),
-        MainColor = Color3.fromRGB(25, 25, 25),
-        AccentColor = Color3.fromRGB(125, 85, 255),
-        OutlineColor = Color3.fromRGB(40, 40, 40),
-        FontColor = Color3.new(1, 1, 1),
-        Font = Font.fromEnum(Enum.Font.Code),
+        BackgroundColor = Color3.fromRGB(13, 13, 17),
+        MainColor = Color3.fromRGB(23, 23, 30),
+        AccentColor = Color3.fromRGB(110, 103, 255),
+        OutlineColor = Color3.fromRGB(37, 37, 47),
+        FontColor = Color3.fromRGB(240, 240, 246),
+        Font = Font.fromEnum(Enum.Font.BuilderSansMedium),
 
         RedColor = Color3.fromRGB(255, 50, 50),
         DestructiveColor = Color3.fromRGB(220, 38, 38),
@@ -407,14 +408,14 @@ local Templates = {
         SearchbarCollapsedWidth = 32,
         GlobalSearch = false,
 
-        CornerRadius = 4,
+        CornerRadius = 10,
         NotifySide = "Right",
         ShowCustomCursor = true,
 
         Toolbar = true, -- top center controller (true | false | { Offset, ButtonSize, IconSize, Draggable, Visible, DefaultButtons })
         Watermark = false, -- true | { Title, Icon, ShowFPS, ShowPing, ShowPlayer, ShowGame, ShowTime, Segments, ... }
 
-        Font = Enum.Font.Code,
+        Font = Enum.Font.BuilderSansMedium,
         ToggleKeybind = Enum.KeyCode.RightControl,
 
         ShowMobileButtons = true,
@@ -618,6 +619,22 @@ local Templates = {
         Visible = true,
         Interval = 0.25,
     },
+    List = {
+        Values = {},
+        DisabledValues = {},
+
+        Multi = false,
+        Rows = 6, -- visible rows
+        Searchable = false, -- search box above the list
+        -- ModalButton = true, (button that opens the values in a popup grid)
+        ModalColumns = 3,
+
+        Callback = function() end,
+        Changed = function() end,
+
+        Disabled = false,
+        Visible = true,
+    },
     RangeSlider = {
         Text = "Range",
         Default = { 0, 100 }, -- { Low, High }
@@ -732,6 +749,8 @@ local Sizes = {
 local SideIndex = {
     left = 1,
     right = 2,
+    full = 3, -- spans both columns (room for 3 buttons / 3 dropdowns in a row)
+    wide = 3,
 }
 
 --// Scheme Functions \\--
@@ -1995,6 +2014,8 @@ function Library:SetDPIScale(DPIScale: number)
     for _, Option in Options do
         if Option.Type == "Dropdown" then
             Option:RecalculateListSize()
+            Option:RefreshPool()
+        elseif Option.Type == "List" then
             Option:RefreshPool()
         end
     end
@@ -3419,6 +3440,7 @@ function Library:AddOutline(Frame: GuiObject)
     local ShadowStroke = New("UIStroke", {
         Color = "DarkColor",
         Thickness = 1.5,
+        Transparency = 0.7,
         ZIndex = 1,
         Parent = Frame,
     })
@@ -3898,7 +3920,7 @@ function Library:MakeBoxPopOut(Box: any, Options: {
     end
 
     local function BeginDrag(Input: InputObject)
-        if DragState ~= "Idle" or Box.Destroyed or not (ScreenGui and ScreenGui.Parent) then
+        if DragState ~= "Idle" or Box.Destroyed or not Library.GroupboxDrag or not (ScreenGui and ScreenGui.Parent) then
             return
         end
 
@@ -4004,6 +4026,31 @@ function Library:MakeBoxPopOut(Box: any, Options: {
             UpdateDrag(Input)
         end
     end))
+end
+
+--// Turns groupbox dragging (pop out) on / off. Turning it off docks every floating groupbox again \\--
+function Library:SetGroupboxDrag(Enabled: boolean)
+    Library.GroupboxDrag = Enabled == true
+    if Library.GroupboxDrag then
+        return
+    end
+
+    for _, Tab in Library.Tabs do
+        if typeof(Tab) ~= "table" then
+            continue
+        end
+
+        for _, Box in Tab.Groupboxes or {} do
+            if Box.PoppedOut and Box.SetPoppedOut then
+                Box:SetPoppedOut(false)
+            end
+        end
+        for _, Box in Tab.Tabboxes or {} do
+            if Box.PoppedOut and Box.SetPoppedOut then
+                Box:SetPoppedOut(false)
+            end
+        end
+    end
 end
 
 --// Deprecated \\--
@@ -5034,6 +5081,334 @@ end
 
 function Library:OnUnload(Callback)
     table.insert(Library.UnloadSignals, Callback)
+end
+
+--// Grid popup shared by dropdowns and lists (Object needs Values, Value, Display, RunChanged, ...) \\--
+local function OpenValueModal(Object, Info, Idx)
+    if Object.Disabled or Object.Destroyed then
+        return
+    end
+
+    local Window = Library.Window
+    if not (Window and Window.AddDialog) or Library.ActiveDialog then
+        return
+    end
+
+    if Object.BeforeModalOpen then
+        Object.BeforeModalOpen()
+    end
+
+    local Columns = math.max(1, math.floor(tonumber(Info.ModalColumns) or 3))
+    local CellHeight, CellGap = 26, 6
+
+    local Dialog
+    local GridScroll
+    local Cells = {}
+    local Query = ""
+
+    local function GetEntries()
+        local Entries = {}
+        local Values = Object.Values
+        local IsDictionary = not IsSequentialArray(Values)
+
+        for Key, RawValue in Values do
+            local Value = IsDictionary and Key or RawValue
+            local Text = tostring(Info.FormatListValue and Info.FormatListValue(RawValue) or RawValue)
+
+            if Query ~= "" then
+                local Matched = FuzzyScore(StripRichText(Text):lower(), Query)
+                if not Matched then
+                    continue
+                end
+            end
+
+            local IsDisabled = table.find(Object.DisabledValues, Value) ~= nil
+                or (RawValue ~= nil and RawValue ~= Value and table.find(Object.DisabledValues, RawValue) ~= nil)
+
+            table.insert(Entries, { Key = Key, Value = Value, Text = Text, Disabled = IsDisabled })
+        end
+
+        if IsDictionary then
+            table.sort(Entries, function(A, B)
+                return StripRichText(A.Text):lower() < StripRichText(B.Text):lower()
+            end)
+        else
+            table.sort(Entries, function(A, B)
+                return A.Key < B.Key
+            end)
+        end
+
+        return Entries
+    end
+
+    local function IsSelected(Value)
+        if Info.Multi then
+            return Object.Value[Value] == true
+        end
+
+        return Object.Value == Value
+    end
+
+    local function UpdateDescription()
+        if not Dialog or Dialog.Destroyed then
+            return
+        end
+
+        if Info.Multi then
+            Dialog:SetDescription(string.format("%d / %d selected", Object:GetActiveValues(true), GetTableSize(Object.Values)))
+        end
+    end
+
+    local function UpdateCell(Cell)
+        local Selected = IsSelected(Cell.Entry.Value)
+
+        Cell.Label.TextTransparency = Cell.Entry.Disabled and 0.8 or (Selected and 0 or 0.5)
+        Cell.Button.BackgroundTransparency = Selected and 0.75 or 0
+
+        local ButtonRegistry = Library.Registry[Cell.Button]
+        if ButtonRegistry then
+            ButtonRegistry.BackgroundColor3 = Selected and "AccentColor" or "MainColor"
+        end
+        Cell.Button.BackgroundColor3 = Selected and Library.Scheme.AccentColor or Library.Scheme.MainColor
+
+        local StrokeRegistry = Library.Registry[Cell.Stroke]
+        if StrokeRegistry then
+            StrokeRegistry.Color = Selected and "AccentColor" or "OutlineColor"
+        end
+        Cell.Stroke.Color = Selected and Library.Scheme.AccentColor or Library.Scheme.OutlineColor
+    end
+
+    local function Commit()
+        Object:Display() --// refreshes the cells through ModalRefresh
+        if Object.AfterModalCommit then
+            Object.AfterModalCommit()
+        end
+
+        Library:UpdateDependencyBoxes()
+        Object:RunChanged()
+    end
+
+    local function ToggleEntry(Entry)
+        if Entry.Disabled then
+            return
+        end
+
+        if Info.Multi then
+            local Selected = Object.Value[Entry.Value]
+            if Selected and Object:GetActiveValues(true) == 1 and not Info.AllowNull then
+                return
+            end
+
+            Object.Value[Entry.Value] = (not Selected) and true or nil
+            Commit()
+            return
+        end
+
+        if Object.Value == Entry.Value then
+            if Info.AllowNull then
+                Object.Value = nil
+                Commit()
+            end
+        else
+            Object.Value = Entry.Value
+            Commit()
+        end
+
+        Dialog:Dismiss()
+    end
+
+    --// Applies to the values currently shown (so it respects the search box) and never touches disabled values \\--
+    local function Bulk(Mode: string)
+        if Info.Multi then
+            local Before = table.clone(Object.Value)
+
+            for _, Entry in GetEntries() do
+                if Entry.Disabled then
+                    continue
+                end
+
+                if Mode == "all" then
+                    Object.Value[Entry.Value] = true
+                elseif Mode == "none" then
+                    Object.Value[Entry.Value] = nil
+                elseif Mode == "invert" then
+                    Object.Value[Entry.Value] = (not Object.Value[Entry.Value]) and true or nil
+                end
+            end
+
+            if not Info.AllowNull and GetTableSize(Object.Value) == 0 then
+                local Keep = Mode == "none" and next(Before) or nil
+                Object.Value = Keep ~= nil and { [Keep] = true } or Before
+            end
+        elseif Mode == "none" and Info.AllowNull then
+            Object.Value = nil
+        end
+
+        Commit()
+    end
+
+    local function Rebuild()
+        for _, Cell in Cells do
+            Cell.Button:Destroy()
+        end
+        table.clear(Cells)
+
+        for Index, Entry in GetEntries() do
+            local Button = New("TextButton", {
+                BackgroundColor3 = "MainColor",
+                LayoutOrder = Index,
+                Text = "",
+                Parent = GridScroll,
+            })
+            New("UICorner", {
+                CornerRadius = UDim.new(0, Library.CornerRadius / 2),
+                Parent = Button,
+            })
+            local Stroke = New("UIStroke", {
+                Color = "OutlineColor",
+                Parent = Button,
+            })
+
+            local Label = New("TextLabel", {
+                BackgroundTransparency = 1,
+                Size = UDim2.fromScale(1, 1),
+                Text = Entry.Text,
+                TextSize = 14,
+                TextTruncate = Enum.TextTruncate.AtEnd,
+                Parent = Button,
+            })
+            New("UIPadding", {
+                PaddingLeft = UDim.new(0, 6),
+                PaddingRight = UDim.new(0, 6),
+                Parent = Label,
+            })
+
+            local Cell = { Button = Button, Label = Label, Stroke = Stroke, Entry = Entry }
+            Button.MouseButton1Click:Connect(function()
+                ToggleEntry(Entry)
+            end)
+
+            table.insert(Cells, Cell)
+            UpdateCell(Cell)
+        end
+    end
+
+    --// Dialog \\--
+    local Footer = {}
+    if Info.Multi then
+        table.insert(Footer, { Id = "SelectAll", Title = "Select all", Variant = "Secondary", Order = 1, Callback = function() Bulk("all") end })
+        table.insert(Footer, { Id = "DeselectAll", Title = "Deselect all", Variant = "Secondary", Order = 2, Callback = function() Bulk("none") end })
+        table.insert(Footer, { Id = "Invert", Title = "Invert", Variant = "Secondary", Order = 3, Callback = function() Bulk("invert") end })
+    elseif Info.AllowNull then
+        table.insert(Footer, { Id = "Clear", Title = "Clear", Variant = "Secondary", Order = 1, Callback = function() Bulk("none") end })
+    end
+    table.insert(Footer, {
+        Id = "Done",
+        Title = "Done",
+        Variant = "Primary",
+        Order = 10,
+        Callback = function(Dlg)
+            Dlg:Dismiss()
+        end,
+    })
+
+    Dialog = Window:AddDialog("DropdownModal_" .. tostring(Idx), {
+        Title = Object.Text or "Select",
+        Description = Info.Multi and "Select one or more values" or "Select a value",
+        AutoDismiss = false,
+        OutsideClickDismiss = true,
+        FooterButtons = Footer,
+    })
+    Object.Modal = Dialog
+
+    local TotalValues = GetTableSize(Object.Values)
+    if Info.Searchable or TotalValues > 12 then
+        local SearchInput = New("TextBox", {
+            BackgroundColor3 = "MainColor",
+            ClearTextOnFocus = false,
+            LayoutOrder = 1,
+            PlaceholderText = "Search...",
+            Size = UDim2.new(1, 0, 0, 22),
+            TextSize = 14,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            Parent = Dialog.Container,
+        })
+        New("UIPadding", {
+            PaddingLeft = UDim.new(0, 8),
+            PaddingRight = UDim.new(0, 8),
+            Parent = SearchInput,
+        })
+        New("UICorner", {
+            CornerRadius = UDim.new(0, Library.CornerRadius / 2),
+            Parent = SearchInput,
+        })
+        New("UIStroke", {
+            Color = "OutlineColor",
+            Parent = SearchInput,
+        })
+
+        SearchInput:GetPropertyChangedSignal("Text"):Connect(function()
+            Query = NormalizeSearch(SearchInput.Text:lower())
+            Rebuild()
+        end)
+    end
+
+    local Rows = math.max(1, math.ceil(TotalValues / Columns))
+    local GridHeight = math.clamp(
+        Rows * CellHeight + (Rows - 1) * CellGap + 8,
+        CellHeight + 8,
+        8 * CellHeight + 7 * CellGap + 8
+    )
+
+    GridScroll = New("ScrollingFrame", {
+        AutomaticCanvasSize = Enum.AutomaticSize.Y,
+        BackgroundTransparency = 1,
+        CanvasSize = UDim2.fromOffset(0, 0),
+        LayoutOrder = 2,
+        ScrollBarImageColor3 = "OutlineColor",
+        ScrollBarThickness = 0,
+        ScrollingDirection = Enum.ScrollingDirection.Y,
+        Size = UDim2.new(1, 0, 0, GridHeight),
+        Parent = Dialog.Container,
+    })
+    New("UIGridLayout", {
+        CellPadding = UDim2.fromOffset(CellGap, CellGap),
+        CellSize = UDim2.new(1 / Columns, -math.ceil(CellGap * (Columns - 1) / Columns) - 1, 0, CellHeight),
+        SortOrder = Enum.SortOrder.LayoutOrder,
+        Parent = GridScroll,
+    })
+    New("UIPadding", {
+        PaddingBottom = UDim.new(0, 3),
+        PaddingLeft = UDim.new(0, 3),
+        PaddingRight = UDim.new(0, 3),
+        PaddingTop = UDim.new(0, 3),
+        Parent = GridScroll,
+    })
+
+    Object.ModalRefresh = function()
+        if Dialog.Destroyed then
+            Object.Modal, Object.ModalRefresh, Object.ModalRebuild = nil, nil, nil
+            return
+        end
+
+        for _, Cell in Cells do
+            UpdateCell(Cell)
+        end
+        UpdateDescription()
+    end
+    Object.ModalRebuild = function()
+        if Dialog.Destroyed then
+            Object.Modal, Object.ModalRefresh, Object.ModalRebuild = nil, nil, nil
+            return
+        end
+
+        Rebuild()
+        UpdateDescription()
+    end
+
+    Dialog:Resize()
+    Rebuild()
+    UpdateDescription()
 end
 
 local BaseAddons = {}
@@ -7660,6 +8035,9 @@ do
                     TextTransparency = 0,
                 })
                 Button.Tween:Play()
+                TweenService:Create(Button.Base, Library.TweenInfo, {
+                    BackgroundColor3 = Library:GetBetterColor(Library.Scheme.MainColor, 5),
+                }):Play()
 
                 if Button.IconImage and Button.IconImage.Visible then
                     TweenService:Create(Button.IconImage, Library.TweenInfo, {
@@ -7676,6 +8054,9 @@ do
                     TextTransparency = 0.4,
                 })
                 Button.Tween:Play()
+                TweenService:Create(Button.Base, Library.TweenInfo, {
+                    BackgroundColor3 = Library.Scheme.MainColor,
+                }):Play()
 
                 if Button.IconImage and Button.IconImage.Visible then
                     TweenService:Create(Button.IconImage, Library.TweenInfo, {
@@ -8822,48 +9203,79 @@ do
             })
         end
 
+        --// Compact: value text inside a 15px bar. Default: value on the title row + thin pill track with a round thumb \\--
         local Bar = New("TextButton", {
             Active = not Slider.Disabled,
             AnchorPoint = Vector2.new(0, 1),
             BackgroundColor3 = "MainColor",
+            BackgroundTransparency = Info.Compact and 0 or 1,
             Position = UDim2.fromScale(0, 1),
-            Size = UDim2.new(1, 0, 0, 15),
+            Size = UDim2.new(1, 0, 0, Info.Compact and 15 or 18),
             Text = "",
             Parent = Holder,
         })
 
-        New("UIStroke", {
-            Color = "OutlineColor",
-            Parent = Bar,
-        })
+        local Track = Bar
+        if Info.Compact then
+            New("UIStroke", {
+                Color = "OutlineColor",
+                Parent = Bar,
+            })
+        else
+            Track = New("Frame", {
+                AnchorPoint = Vector2.new(0, 0.5),
+                BackgroundColor3 = "MainColor",
+                Position = UDim2.fromScale(0, 0.5),
+                Size = UDim2.new(1, 0, 0, 6),
+                Parent = Bar,
+            })
+            New("UICorner", {
+                CornerRadius = UDim.new(1, 0),
+                Parent = Track,
+            })
+        end
+
+        local TextParent = Info.Compact and Bar or Holder
+        local TextAnchor = Info.Compact and Vector2.new(0, 0) or Vector2.new(1, 0)
+        local TextPosition = Info.Compact and UDim2.fromScale(0, 0) or UDim2.fromScale(1, 0)
+        local TextBoxSize = Info.Compact and UDim2.fromScale(1, 1) or UDim2.new(0.6, 0, 0, 14)
+        local TextAlignment = Info.Compact and Enum.TextXAlignment.Center or Enum.TextXAlignment.Right
 
         local DisplayLabel = New("TextLabel", {
+            AnchorPoint = TextAnchor,
             BackgroundTransparency = 1,
-            Size = UDim2.fromScale(1, 1),
+            Position = TextPosition,
+            Size = TextBoxSize,
             Text = "",
             TextSize = 14,
+            TextXAlignment = TextAlignment,
             ZIndex = Bar.ZIndex + 2,
-            Parent = Bar,
+            Parent = TextParent,
         })
-        New("UIStroke", {
-            ApplyStrokeMode = Enum.ApplyStrokeMode.Contextual,
-            Color = "DarkColor",
-            LineJoinMode = Enum.LineJoinMode.Miter,
-            Parent = DisplayLabel,
-        })
+        if Info.Compact then
+            New("UIStroke", {
+                ApplyStrokeMode = Enum.ApplyStrokeMode.Contextual,
+                Color = "DarkColor",
+                LineJoinMode = Enum.LineJoinMode.Miter,
+                Parent = DisplayLabel,
+            })
+        end
 
         local InputTextBox
         local InputTextBoxStroke
         if Info.AllowRightClickInput then
             InputTextBox = New("TextBox", {
+                AnchorPoint = TextAnchor,
                 BackgroundTransparency = 1,
-                Size = UDim2.fromScale(1, 1),
+                Position = TextPosition,
+                Size = TextBoxSize,
                 Text = "",
                 TextSize = 14,
+                TextXAlignment = TextAlignment,
                 ZIndex = Bar.ZIndex + 3,
                 Visible = false,
                 ClearTextOnFocus = false,
-                Parent = Bar,
+                Parent = TextParent,
             })
             InputTextBoxStroke = New("UIStroke", {
                 ApplyStrokeMode = Enum.ApplyStrokeMode.Contextual,
@@ -8876,25 +9288,51 @@ do
         local Fill = New("Frame", {
             BackgroundColor3 = "AccentColor",
             Size = UDim2.fromScale(0.5, 1),
-            ZIndex = Bar.ZIndex + 1,
-            Parent = Bar,
+            ZIndex = Track.ZIndex + 1,
+            Parent = Track,
         })
 
-        table.insert(
-            Library.Corners,
+        local Thumb
+        if Info.Compact then
+            table.insert(
+                Library.Corners,
+                New("UICorner", {
+                    CornerRadius = UDim.new(0, Library.CornerRadius / 2),
+                    Parent = Bar,
+                })
+            )
+            table.insert(
+                Library.Corners,
+                New("UICorner", {
+                    CornerRadius = UDim.new(0, Library.CornerRadius / 2),
+                    Parent = Fill,
+                })
+            )
+        else
             New("UICorner", {
-                CornerRadius = UDim.new(0, Library.CornerRadius / 2),
-                Parent = Bar,
-            })
-        )
-
-        table.insert(
-            Library.Corners,
-            New("UICorner", {
-                CornerRadius = UDim.new(0, Library.CornerRadius / 2),
+                CornerRadius = UDim.new(1, 0),
                 Parent = Fill,
             })
-        )
+
+            Thumb = New("Frame", {
+                AnchorPoint = Vector2.new(0.5, 0.5),
+                BackgroundColor3 = "FontColor",
+                Position = UDim2.fromScale(0.5, 0.5),
+                Size = UDim2.fromOffset(14, 14),
+                ZIndex = Track.ZIndex + 2,
+                Parent = Track,
+            })
+            New("UICorner", {
+                CornerRadius = UDim.new(1, 0),
+                Parent = Thumb,
+            })
+            New("UIStroke", {
+                Color = "DarkColor",
+                Thickness = 2,
+                Transparency = 0.7,
+                Parent = Thumb,
+            })
+        end
 
         function Slider:UpdateColors()
             if Library.Unloaded then
@@ -8912,6 +9350,9 @@ do
 
             Fill.BackgroundColor3 = Slider.Disabled and Library.Scheme.OutlineColor or Library.Scheme.AccentColor
             Library.Registry[Fill].BackgroundColor3 = Slider.Disabled and "OutlineColor" or "AccentColor"
+            if Thumb then
+                Thumb.BackgroundTransparency = Slider.Disabled and 0.7 or 0
+            end
         end
 
         function Slider:Display()
@@ -8947,6 +9388,9 @@ do
 
             local X = (Slider.Value - Slider.Min) / (Slider.Max - Slider.Min)
             Fill.Size = UDim2.fromScale(X, 1)
+            if Thumb then
+                Thumb.Position = UDim2.fromScale(X, 0.5)
+            end
         end
 
         function Slider:OnChanged(Func)
@@ -9286,16 +9730,19 @@ do
             Active = not Slider.Disabled,
             AnchorPoint = Vector2.new(0, 1),
             BackgroundColor3 = "MainColor",
-            Position = Info.Compact and UDim2.fromScale(0, 1) or UDim2.new(0, 0, 1, -3),
-            Size = UDim2.new(1, 0, 0, Info.Compact and 15 or 8),
+            BackgroundTransparency = Info.Compact and 0 or 1,
+            Position = UDim2.fromScale(0, 1),
+            Size = UDim2.new(1, 0, 0, Info.Compact and 15 or 18),
             Text = "",
             Parent = Holder,
         })
-        New("UIStroke", {
-            Color = "OutlineColor",
-            Parent = Bar,
-        })
+
+        local Track = Bar
         if Info.Compact then
+            New("UIStroke", {
+                Color = "OutlineColor",
+                Parent = Bar,
+            })
             table.insert(
                 Library.Corners,
                 New("UICorner", {
@@ -9304,17 +9751,24 @@ do
                 })
             )
         else
+            Track = New("Frame", {
+                AnchorPoint = Vector2.new(0, 0.5),
+                BackgroundColor3 = "MainColor",
+                Position = UDim2.fromScale(0, 0.5),
+                Size = UDim2.new(1, 0, 0, 6),
+                Parent = Bar,
+            })
             New("UICorner", {
                 CornerRadius = UDim.new(1, 0),
-                Parent = Bar,
+                Parent = Track,
             })
         end
 
         local Fill = New("Frame", {
             BackgroundColor3 = "AccentColor",
             Size = UDim2.fromScale(0.5, 1),
-            ZIndex = Bar.ZIndex + 1,
-            Parent = Bar,
+            ZIndex = Track.ZIndex + 1,
+            Parent = Track,
         })
         if Info.Compact then
             table.insert(
@@ -9336,9 +9790,9 @@ do
                 AnchorPoint = Vector2.new(0.5, 0.5),
                 BackgroundColor3 = "FontColor",
                 Position = UDim2.fromScale(0, 0.5),
-                Size = Info.Compact and UDim2.new(0, 4, 1, 4) or UDim2.fromOffset(12, 12),
-                ZIndex = Bar.ZIndex + 2,
-                Parent = Bar,
+                Size = Info.Compact and UDim2.new(0, 4, 1, 4) or UDim2.fromOffset(14, 14),
+                ZIndex = Track.ZIndex + 2,
+                Parent = Track,
             })
             New("UIStroke", {
                 Color = "DarkColor",
@@ -9723,6 +10177,695 @@ do
         end
 
         return Slider
+    end
+
+    --// List: like a dropdown, but the values are always visible (scrollable) and a button opens the grid popup \\--
+    function Funcs:AddList(Idx, Info)
+        if self.Destroyed then
+            return nil
+        end
+
+        Info = Library:Validate(Info, Templates.List)
+
+        local Groupbox = self
+        local Container = Groupbox.Container
+
+        local List = {
+            Connections = {},
+            Destroyed = false,
+
+            Text = typeof(Info.Text) == "string" and Info.Text or nil,
+
+            Value = Info.Multi and {} or nil,
+            Values = Info.Values,
+            DisabledValues = Info.DisabledValues,
+
+            Multi = Info.Multi,
+
+            Tooltip = Info.Tooltip,
+            DisabledTooltip = Info.DisabledTooltip,
+            TooltipTable = nil,
+
+            Callback = Info.Callback,
+            Changed = Info.Changed,
+
+            Disabled = Info.Disabled,
+            Visible = Info.Visible,
+
+            Type = "List",
+        }
+
+        local ModalEnabled = Info.ModalButton ~= false
+        local ItemHeight = 22
+        local Rows = math.max(1, math.floor(tonumber(Info.Rows) or 6))
+        local PoolSize = Rows + 2
+        local Query = ""
+        local Entries = {}
+        local Pool = {}
+
+        local Holder = New("Frame", {
+            AutomaticSize = Enum.AutomaticSize.Y,
+            BackgroundTransparency = 1,
+            Size = UDim2.new(1, 0, 0, 0),
+            Visible = List.Visible,
+            Parent = Container,
+        })
+        New("UIListLayout", {
+            Padding = UDim.new(0, 6),
+            Parent = Holder,
+        })
+
+        local Header = New("Frame", {
+            BackgroundTransparency = 1,
+            LayoutOrder = 1,
+            Size = UDim2.new(1, 0, 0, 16),
+            Visible = List.Text ~= nil or ModalEnabled,
+            Parent = Holder,
+        })
+        local Label = New("TextLabel", {
+            BackgroundTransparency = 1,
+            Size = UDim2.new(1, ModalEnabled and -22 or 0, 1, 0),
+            Text = List.Text or "",
+            TextSize = 14,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            Parent = Header,
+        })
+
+        local ModalButton
+        if ModalEnabled then
+            ModalButton = New("ImageButton", {
+                AnchorPoint = Vector2.new(1, 0.5),
+                BackgroundTransparency = 1,
+                ImageColor3 = "FontColor",
+                ImageTransparency = 0.5,
+                Position = UDim2.fromScale(1, 0.5),
+                Size = UDim2.fromOffset(14, 14),
+                Parent = Header,
+            })
+
+            local GridIcon = Library:GetIcon("layout-grid")
+            if GridIcon then
+                Library:ApplyLucideIcon(ModalButton, GridIcon)
+            else
+                New("TextLabel", {
+                    BackgroundTransparency = 1,
+                    Size = UDim2.fromScale(1, 1),
+                    Text = "::",
+                    TextSize = 14,
+                    Parent = ModalButton,
+                })
+            end
+
+            table.insert(List.Connections, ModalButton.MouseEnter:Connect(function()
+                if not List.Disabled then
+                    TweenService:Create(ModalButton, Library.TweenInfo, { ImageTransparency = 0 }):Play()
+                end
+            end))
+            table.insert(List.Connections, ModalButton.MouseLeave:Connect(function()
+                if not List.Disabled then
+                    TweenService:Create(ModalButton, Library.TweenInfo, { ImageTransparency = 0.5 }):Play()
+                end
+            end))
+            table.insert(List.Connections, ModalButton.MouseButton1Click:Connect(function()
+                List:OpenModal()
+            end))
+        end
+
+        local SearchBox
+        if Info.Searchable then
+            SearchBox = New("TextBox", {
+                BackgroundColor3 = "MainColor",
+                ClearTextOnFocus = false,
+                LayoutOrder = 2,
+                PlaceholderText = "Search...",
+                Size = UDim2.new(1, 0, 0, 22),
+                Text = "",
+                TextSize = 14,
+                TextXAlignment = Enum.TextXAlignment.Left,
+                Parent = Holder,
+            })
+            New("UIPadding", {
+                PaddingLeft = UDim.new(0, 8),
+                PaddingRight = UDim.new(0, 8),
+                Parent = SearchBox,
+            })
+            table.insert(
+                Library.Corners,
+                New("UICorner", {
+                    CornerRadius = UDim.new(0, Library.CornerRadius / 2),
+                    Parent = SearchBox,
+                })
+            )
+            local SearchStroke = New("UIStroke", {
+                Color = "OutlineColor",
+                Parent = SearchBox,
+            })
+
+            table.insert(List.Connections, SearchBox.Focused:Connect(function()
+                Library.Registry[SearchStroke].Color = "AccentColor"
+                TweenService:Create(SearchStroke, Library.TweenInfo, { Color = Library.Scheme.AccentColor }):Play()
+            end))
+            table.insert(List.Connections, SearchBox.FocusLost:Connect(function()
+                Library.Registry[SearchStroke].Color = "OutlineColor"
+                TweenService:Create(SearchStroke, Library.TweenInfo, { Color = Library.Scheme.OutlineColor }):Play()
+            end))
+        end
+
+        local ListBox = New("Frame", {
+            BackgroundColor3 = "MainColor",
+            ClipsDescendants = true,
+            LayoutOrder = 3,
+            Size = UDim2.new(1, 0, 0, Rows * ItemHeight + 6),
+            Parent = Holder,
+        })
+        table.insert(
+            Library.Corners,
+            New("UICorner", {
+                CornerRadius = UDim.new(0, Library.CornerRadius / 2),
+                Parent = ListBox,
+            })
+        )
+        New("UIStroke", {
+            Color = "OutlineColor",
+            Parent = ListBox,
+        })
+        New("UIPadding", {
+            PaddingBottom = UDim.new(0, 3),
+            PaddingLeft = UDim.new(0, 3),
+            PaddingRight = UDim.new(0, 3),
+            PaddingTop = UDim.new(0, 3),
+            Parent = ListBox,
+        })
+
+        local Items = New("ScrollingFrame", {
+            BackgroundTransparency = 1,
+            CanvasSize = UDim2.fromOffset(0, 0),
+            ScrollBarThickness = 0,
+            ScrollingDirection = Enum.ScrollingDirection.Y,
+            Size = UDim2.fromScale(1, 1),
+            Parent = ListBox,
+        })
+
+        local function IsSelected(Value: any): boolean
+            if List.Multi then
+                return List.Value[Value] == true
+            end
+
+            return List.Value == Value
+        end
+
+        local function BuildEntries()
+            table.clear(Entries)
+
+            local Values = List.Values
+            local IsDictionary = not IsSequentialArray(Values)
+
+            for Key, RawValue in Values do
+                local Value = IsDictionary and Key or RawValue
+                local Text = tostring(Info.FormatListValue and Info.FormatListValue(RawValue) or RawValue)
+
+                local Score = 0
+                if Query ~= "" then
+                    local Matched, MatchScore = FuzzyScore(StripRichText(Text):lower(), Query)
+                    if not Matched then
+                        continue
+                    end
+
+                    Score = MatchScore
+                end
+
+                local IsDisabled = table.find(List.DisabledValues, Value) ~= nil
+                    or (RawValue ~= nil and RawValue ~= Value and table.find(List.DisabledValues, RawValue) ~= nil)
+
+                table.insert(Entries, { Key = Key, Value = Value, Text = Text, Disabled = IsDisabled, Score = Score })
+            end
+
+            table.sort(Entries, function(A, B)
+                if Query ~= "" and A.Score ~= B.Score then
+                    return A.Score > B.Score
+                end
+
+                if IsDictionary then
+                    return StripRichText(A.Text):lower() < StripRichText(B.Text):lower()
+                end
+
+                return A.Key < B.Key
+            end)
+        end
+
+        local function CreateRow()
+            local Row = {}
+
+            local Button = New("TextButton", {
+                BackgroundColor3 = "AccentColor",
+                BackgroundTransparency = 1,
+                Size = UDim2.new(1, 0, 0, ItemHeight),
+                Text = "",
+                Visible = false,
+                Parent = Items,
+            })
+            table.insert(
+                Library.Corners,
+                New("UICorner", {
+                    CornerRadius = UDim.new(0, Library.CornerRadius / 2),
+                    Parent = Button,
+                })
+            )
+
+            local Bar = New("Frame", {
+                AnchorPoint = Vector2.new(0, 0.5),
+                BackgroundColor3 = "AccentColor",
+                Position = UDim2.new(0, 3, 0.5, 0),
+                Size = UDim2.fromOffset(2, 12),
+                Visible = false,
+                Parent = Button,
+            })
+            New("UICorner", {
+                CornerRadius = UDim.new(1, 0),
+                Parent = Bar,
+            })
+
+            local RowLabel = New("TextLabel", {
+                BackgroundTransparency = 1,
+                Size = UDim2.fromScale(1, 1),
+                Text = "",
+                TextSize = 14,
+                TextTruncate = Enum.TextTruncate.AtEnd,
+                TextXAlignment = Enum.TextXAlignment.Left,
+                Parent = Button,
+            })
+            New("UIPadding", {
+                PaddingLeft = UDim.new(0, 12),
+                PaddingRight = UDim.new(0, 6),
+                Parent = RowLabel,
+            })
+
+            Row.Button, Row.Label, Row.Bar = Button, RowLabel, Bar
+
+            function Row:Update()
+                local Entry = Row.Entry
+                if not Entry then
+                    return
+                end
+
+                local Selected = IsSelected(Entry.Value)
+                Row.Selected = Selected
+
+                Button.Active = not List.Disabled
+                Button.BackgroundTransparency = Selected and 0.82 or 1
+                Bar.Visible = Selected
+                RowLabel.TextTransparency = (Entry.Disabled or List.Disabled) and 0.8 or (Selected and 0 or 0.45)
+            end
+
+            table.insert(List.Connections, Button.MouseEnter:Connect(function()
+                local Entry = Row.Entry
+                if Entry and not Entry.Disabled and not List.Disabled and not Row.Selected then
+                    TweenService:Create(Button, Library.TweenInfo, { BackgroundTransparency = 0.93 }):Play()
+                    TweenService:Create(RowLabel, Library.TweenInfo, { TextTransparency = 0.2 }):Play()
+                end
+            end))
+            table.insert(List.Connections, Button.MouseLeave:Connect(function()
+                local Entry = Row.Entry
+                if Entry and not Entry.Disabled and not List.Disabled and not Row.Selected then
+                    TweenService:Create(Button, Library.TweenInfo, { BackgroundTransparency = 1 }):Play()
+                    TweenService:Create(RowLabel, Library.TweenInfo, { TextTransparency = 0.45 }):Play()
+                end
+            end))
+
+            table.insert(List.Connections, Button.MouseButton1Click:Connect(function()
+                local Entry = Row.Entry
+                if not Entry or Entry.Disabled or List.Disabled then
+                    return
+                end
+
+                local Selected = IsSelected(Entry.Value)
+                if List.Multi then
+                    if Selected and List:GetActiveValues(true) == 1 and not Info.AllowNull then
+                        return
+                    end
+
+                    List.Value[Entry.Value] = (not Selected) and true or nil
+                elseif Selected then
+                    if not Info.AllowNull then
+                        return
+                    end
+
+                    List.Value = nil
+                else
+                    List.Value = Entry.Value
+                end
+
+                List:Display()
+                Library:UpdateDependencyBoxes()
+                List:RunChanged()
+            end))
+
+            return Row
+        end
+
+        for _ = 1, PoolSize do
+            table.insert(Pool, CreateRow())
+        end
+
+        function List:RefreshPool()
+            local Total = #Entries
+            local First = 1
+            if Total > PoolSize then
+                local ScrollY = Items.CanvasPosition.Y / Library.DPIScale
+                First = math.clamp(math.floor(ScrollY / ItemHeight) + 1, 1, Total - PoolSize + 1)
+            end
+
+            for SlotIndex, Row in Pool do
+                local DataIndex = First + SlotIndex - 1
+                local Entry = Entries[DataIndex]
+
+                Row.Entry = Entry
+                if not Entry then
+                    Row.Button.Visible = false
+                    continue
+                end
+
+                Row.Button.Visible = true
+                Row.Button.Position = UDim2.fromOffset(0, (DataIndex - 1) * ItemHeight)
+                Row.Label.Text = Entry.Text
+                Row:Update()
+            end
+        end
+
+        function List:BuildList()
+            BuildEntries()
+            Items.CanvasSize = UDim2.fromOffset(0, #Entries * ItemHeight)
+            List:RefreshPool()
+
+            if List.ModalRebuild then
+                List.ModalRebuild()
+            end
+        end
+
+        function List:Display()
+            if Library.Unloaded then
+                return
+            end
+
+            for _, Row in Pool do
+                Row:Update()
+            end
+
+            if List.ModalRefresh then
+                List.ModalRefresh()
+            end
+        end
+
+        function List:UpdateColors()
+            if Library.Unloaded then
+                return
+            end
+
+            Label.TextTransparency = List.Disabled and 0.8 or 0
+            if ModalButton then
+                ModalButton.ImageTransparency = List.Disabled and 0.8 or 0.5
+            end
+
+            for _, Row in Pool do
+                Row:Update()
+            end
+        end
+
+        function List:OnChanged(Func)
+            List.Changed = Func
+        end
+
+        function List:RunChanged()
+            if List.Disabled then
+                return
+            end
+
+            Library:SafeCallback(List.Callback, List.Value)
+            Library:SafeCallback(List.Changed, List.Value)
+        end
+
+        function List:GetActiveValues(ReturnCount)
+            local Table = {}
+
+            if List.Multi then
+                for Value in List.Value do
+                    table.insert(Table, Value)
+                end
+            elseif List.Value ~= nil then
+                table.insert(Table, List.Value)
+            end
+
+            return ReturnCount == true and GetTableSize(Table) or Table
+        end
+
+        local function ValueExists(Value: any): boolean
+            if IsSequentialArray(List.Values) then
+                return table.find(List.Values, Value) ~= nil
+            end
+
+            return List.Values[Value] ~= nil
+        end
+
+        function List:SetValue(Value)
+            if List.Multi then
+                if typeof(Value) == "string" then
+                    Value = if Value == "" then {} else { [Value] = true }
+                end
+
+                local Table = {}
+                for Item, Active in Value or {} do
+                    if typeof(Active) ~= "boolean" then
+                        Table[Active] = true
+                    elseif Active and ValueExists(Item) then
+                        Table[Item] = true
+                    end
+                end
+
+                List.Value = Table
+            elseif ValueExists(Value) then
+                List.Value = Value
+            elseif not Value then
+                List.Value = nil
+            end
+
+            List:Display()
+            if not List.Disabled then
+                Library:UpdateDependencyBoxes()
+            end
+
+            List:RunChanged()
+        end
+
+        function List:SetValues(Values)
+            List.Values = Values
+
+            local Changed = false
+            if List.Multi then
+                for Value in List.Value do
+                    if not ValueExists(Value) then
+                        List.Value[Value] = nil
+                        Changed = true
+                    end
+                end
+            elseif List.Value ~= nil and not ValueExists(List.Value) then
+                List.Value = nil
+                Changed = true
+            end
+
+            List:BuildList()
+            List:Display()
+
+            if Changed then
+                if not List.Disabled then
+                    Library:UpdateDependencyBoxes()
+                end
+
+                List:RunChanged()
+            end
+        end
+
+        function List:AddValues(Values)
+            if typeof(Values) ~= "table" and typeof(Values) ~= "string" then
+                return
+            end
+
+            if not IsSequentialArray(List.Values) then
+                if typeof(Values) == "string" then
+                    List.Values[Values] = Values
+                elseif IsSequentialArray(Values) then
+                    for _, Item in Values do
+                        List.Values[Item] = Item
+                    end
+                else
+                    for Key, Item in Values do
+                        List.Values[Key] = Item
+                    end
+                end
+            elseif typeof(Values) == "table" then
+                for _, Item in Values do
+                    table.insert(List.Values, Item)
+                end
+            else
+                table.insert(List.Values, Values)
+            end
+
+            List:BuildList()
+        end
+
+        function List:SetDisabledValues(DisabledValues)
+            List.DisabledValues = DisabledValues
+            List:BuildList()
+        end
+
+        function List:AddDisabledValues(DisabledValues)
+            if typeof(DisabledValues) == "table" then
+                for _, Item in DisabledValues do
+                    table.insert(List.DisabledValues, Item)
+                end
+            elseif typeof(DisabledValues) == "string" then
+                table.insert(List.DisabledValues, DisabledValues)
+            else
+                return
+            end
+
+            List:BuildList()
+        end
+
+        function List:SetDisabled(Disabled: boolean)
+            List.Disabled = Disabled
+
+            if List.TooltipTable then
+                List.TooltipTable.Disabled = List.Disabled
+            end
+            if Disabled then
+                List:CloseModal()
+            end
+
+            List:UpdateColors()
+            Library:UpdateDependencyBoxes()
+        end
+
+        function List:SetVisible(Visible: boolean)
+            List.Visible = Visible
+
+            Holder.Visible = List.Visible
+            Groupbox:Resize()
+        end
+
+        function List:SetText(Text: string?)
+            List.Text = Text
+            Label.Text = Text or ""
+            Header.Visible = Text ~= nil or ModalEnabled
+        end
+
+        function List:OpenModal()
+            OpenValueModal(List, Info, Idx)
+        end
+
+        function List:CloseModal()
+            local Modal = List.Modal
+            if Modal and not Modal.Destroyed then
+                Modal:Dismiss()
+            end
+
+            List.Modal = nil
+            List.ModalRefresh = nil
+            List.ModalRebuild = nil
+        end
+
+        table.insert(List.Connections, Items:GetPropertyChangedSignal("CanvasPosition"):Connect(function()
+            List:RefreshPool()
+        end))
+
+        if SearchBox then
+            table.insert(List.Connections, SearchBox:GetPropertyChangedSignal("Text"):Connect(function()
+                Query = NormalizeSearch(SearchBox.Text:lower())
+                Items.CanvasPosition = Vector2.zero
+                List:BuildList()
+            end))
+        end
+
+        --// Defaults \\--
+        local Defaults = {}
+        do
+            local Default = Info.Default
+            local IsDictionary = not IsSequentialArray(List.Values)
+
+            local function ResolveOne(Candidate)
+                if IsDictionary then
+                    return List.Values[Candidate] ~= nil and Candidate or nil
+                end
+
+                return table.find(List.Values, Candidate) ~= nil and Candidate or nil
+            end
+
+            if typeof(Default) == "table" then
+                for _, Candidate in Default do
+                    local Resolved = ResolveOne(Candidate)
+                    if Resolved ~= nil then
+                        table.insert(Defaults, Resolved)
+                    end
+                end
+            elseif Default ~= nil then
+                local Resolved = ResolveOne(Default)
+                if Resolved ~= nil then
+                    table.insert(Defaults, Resolved)
+                end
+            end
+        end
+
+        for _, Value in Defaults do
+            if List.Multi then
+                List.Value[Value] = true
+            else
+                List.Value = Value
+                break
+            end
+        end
+
+        if typeof(List.Tooltip) == "string" or typeof(List.DisabledTooltip) == "string" then
+            List.TooltipTable = Library:AddTooltip(List.Tooltip, List.DisabledTooltip, ListBox)
+            List.TooltipTable.Disabled = List.Disabled
+        end
+
+        List:BuildList()
+        List:UpdateColors()
+        Groupbox:Resize()
+
+        List.Holder = Holder
+        List.HighlightLabel = List.Text and Label or nil
+        table.insert(Groupbox.Elements, List)
+
+        List.Default = Defaults
+        Options[Idx] = List
+
+        function List:Destroy()
+            List.Destroyed = true
+
+            List:CloseModal()
+
+            for _, Connection in List.Connections do
+                Connection:Disconnect()
+            end
+
+            if List.TooltipTable then
+                List.TooltipTable:Destroy()
+            end
+
+            if Holder then
+                Holder:Destroy()
+            end
+
+            local ElemIdx = table.find(Groupbox.Elements, List)
+            if ElemIdx then
+                table.remove(Groupbox.Elements, ElemIdx)
+            end
+
+            Groupbox:Resize()
+            Options[Idx] = nil
+        end
+
+        return List
     end
 
     function Funcs:AddDropdown(Idx, Info)
@@ -10806,328 +11949,16 @@ do
         end
 
         function Dropdown:OpenModal()
-            if Dropdown.Disabled or Dropdown.Destroyed then
-                return
-            end
+            OpenValueModal(Dropdown, Info, Idx)
+        end
 
-            local Window = Library.Window
-            if not (Window and Window.AddDialog) or Library.ActiveDialog then
-                return
-            end
-
+        Dropdown.BeforeModalOpen = function()
             MenuTable:Close()
-
-            local Columns = math.max(1, math.floor(tonumber(Info.ModalColumns) or 3))
-            local CellHeight, CellGap = 26, 6
-
-            local Dialog
-            local GridScroll
-            local Cells = {}
-            local Query = ""
-
-            local function GetEntries()
-                local Entries = {}
-                local Values = Dropdown.Values
-                local IsDictionary = not IsSequentialArray(Values)
-
-                for Key, RawValue in Values do
-                    local Value = IsDictionary and Key or RawValue
-                    local Text = tostring(Info.FormatListValue and Info.FormatListValue(RawValue) or RawValue)
-
-                    if Query ~= "" then
-                        local Matched = FuzzyScore(StripRichText(Text):lower(), Query)
-                        if not Matched then
-                            continue
-                        end
-                    end
-
-                    local IsDisabled = table.find(Dropdown.DisabledValues, Value) ~= nil
-                        or (RawValue ~= nil and RawValue ~= Value and table.find(Dropdown.DisabledValues, RawValue) ~= nil)
-
-                    table.insert(Entries, { Key = Key, Value = Value, Text = Text, Disabled = IsDisabled })
-                end
-
-                if IsDictionary then
-                    table.sort(Entries, function(A, B)
-                        return StripRichText(A.Text):lower() < StripRichText(B.Text):lower()
-                    end)
-                else
-                    table.sort(Entries, function(A, B)
-                        return A.Key < B.Key
-                    end)
-                end
-
-                return Entries
+        end
+        Dropdown.AfterModalCommit = function()
+            for _, Row in Pool do
+                Row:UpdateButton()
             end
-
-            local function IsSelected(Value)
-                if Info.Multi then
-                    return Dropdown.Value[Value] == true
-                end
-
-                return Dropdown.Value == Value
-            end
-
-            local function UpdateDescription()
-                if not Dialog or Dialog.Destroyed then
-                    return
-                end
-
-                if Info.Multi then
-                    Dialog:SetDescription(string.format("%d / %d selected", Dropdown:GetActiveValues(true), GetTableSize(Dropdown.Values)))
-                end
-            end
-
-            local function UpdateCell(Cell)
-                local Selected = IsSelected(Cell.Entry.Value)
-
-                Cell.Label.TextTransparency = Cell.Entry.Disabled and 0.8 or (Selected and 0 or 0.5)
-                Cell.Button.BackgroundTransparency = Selected and 0.75 or 0
-
-                local ButtonRegistry = Library.Registry[Cell.Button]
-                if ButtonRegistry then
-                    ButtonRegistry.BackgroundColor3 = Selected and "AccentColor" or "MainColor"
-                end
-                Cell.Button.BackgroundColor3 = Selected and Library.Scheme.AccentColor or Library.Scheme.MainColor
-
-                local StrokeRegistry = Library.Registry[Cell.Stroke]
-                if StrokeRegistry then
-                    StrokeRegistry.Color = Selected and "AccentColor" or "OutlineColor"
-                end
-                Cell.Stroke.Color = Selected and Library.Scheme.AccentColor or Library.Scheme.OutlineColor
-            end
-
-            local function Commit()
-                Dropdown:Display() --// refreshes the cells through ModalRefresh
-                for _, Row in Pool do
-                    Row:UpdateButton()
-                end
-
-                Library:UpdateDependencyBoxes()
-                Dropdown:RunChanged()
-            end
-
-            local function ToggleEntry(Entry)
-                if Entry.Disabled then
-                    return
-                end
-
-                if Info.Multi then
-                    local Selected = Dropdown.Value[Entry.Value]
-                    if Selected and Dropdown:GetActiveValues(true) == 1 and not Info.AllowNull then
-                        return
-                    end
-
-                    Dropdown.Value[Entry.Value] = (not Selected) and true or nil
-                    Commit()
-                    return
-                end
-
-                if Dropdown.Value == Entry.Value then
-                    if Info.AllowNull then
-                        Dropdown.Value = nil
-                        Commit()
-                    end
-                else
-                    Dropdown.Value = Entry.Value
-                    Commit()
-                end
-
-                Dialog:Dismiss()
-            end
-
-            --// Applies to the values currently shown (so it respects the search box) and never touches disabled values \\--
-            local function Bulk(Mode: string)
-                if Info.Multi then
-                    local Before = table.clone(Dropdown.Value)
-
-                    for _, Entry in GetEntries() do
-                        if Entry.Disabled then
-                            continue
-                        end
-
-                        if Mode == "all" then
-                            Dropdown.Value[Entry.Value] = true
-                        elseif Mode == "none" then
-                            Dropdown.Value[Entry.Value] = nil
-                        elseif Mode == "invert" then
-                            Dropdown.Value[Entry.Value] = (not Dropdown.Value[Entry.Value]) and true or nil
-                        end
-                    end
-
-                    if not Info.AllowNull and GetTableSize(Dropdown.Value) == 0 then
-                        local Keep = Mode == "none" and next(Before) or nil
-                        Dropdown.Value = Keep ~= nil and { [Keep] = true } or Before
-                    end
-                elseif Mode == "none" and Info.AllowNull then
-                    Dropdown.Value = nil
-                end
-
-                Commit()
-            end
-
-            local function Rebuild()
-                for _, Cell in Cells do
-                    Cell.Button:Destroy()
-                end
-                table.clear(Cells)
-
-                for Index, Entry in GetEntries() do
-                    local Button = New("TextButton", {
-                        BackgroundColor3 = "MainColor",
-                        LayoutOrder = Index,
-                        Text = "",
-                        Parent = GridScroll,
-                    })
-                    New("UICorner", {
-                        CornerRadius = UDim.new(0, Library.CornerRadius / 2),
-                        Parent = Button,
-                    })
-                    local Stroke = New("UIStroke", {
-                        Color = "OutlineColor",
-                        Parent = Button,
-                    })
-
-                    local Label = New("TextLabel", {
-                        BackgroundTransparency = 1,
-                        Size = UDim2.fromScale(1, 1),
-                        Text = Entry.Text,
-                        TextSize = 14,
-                        TextTruncate = Enum.TextTruncate.AtEnd,
-                        Parent = Button,
-                    })
-                    New("UIPadding", {
-                        PaddingLeft = UDim.new(0, 6),
-                        PaddingRight = UDim.new(0, 6),
-                        Parent = Label,
-                    })
-
-                    local Cell = { Button = Button, Label = Label, Stroke = Stroke, Entry = Entry }
-                    Button.MouseButton1Click:Connect(function()
-                        ToggleEntry(Entry)
-                    end)
-
-                    table.insert(Cells, Cell)
-                    UpdateCell(Cell)
-                end
-            end
-
-            --// Dialog \\--
-            local Footer = {}
-            if Info.Multi then
-                table.insert(Footer, { Id = "SelectAll", Title = "Select all", Variant = "Secondary", Order = 1, Callback = function() Bulk("all") end })
-                table.insert(Footer, { Id = "DeselectAll", Title = "Deselect all", Variant = "Secondary", Order = 2, Callback = function() Bulk("none") end })
-                table.insert(Footer, { Id = "Invert", Title = "Invert", Variant = "Secondary", Order = 3, Callback = function() Bulk("invert") end })
-            elseif Info.AllowNull then
-                table.insert(Footer, { Id = "Clear", Title = "Clear", Variant = "Secondary", Order = 1, Callback = function() Bulk("none") end })
-            end
-            table.insert(Footer, {
-                Id = "Done",
-                Title = "Done",
-                Variant = "Primary",
-                Order = 10,
-                Callback = function(Dlg)
-                    Dlg:Dismiss()
-                end,
-            })
-
-            Dialog = Window:AddDialog("DropdownModal_" .. tostring(Idx), {
-                Title = Dropdown.Text or "Select",
-                Description = Info.Multi and "Select one or more values" or "Select a value",
-                AutoDismiss = false,
-                OutsideClickDismiss = true,
-                FooterButtons = Footer,
-            })
-            Dropdown.Modal = Dialog
-
-            local TotalValues = GetTableSize(Dropdown.Values)
-            if Info.Searchable or TotalValues > 12 then
-                local SearchInput = New("TextBox", {
-                    BackgroundColor3 = "MainColor",
-                    ClearTextOnFocus = false,
-                    LayoutOrder = 1,
-                    PlaceholderText = "Search...",
-                    Size = UDim2.new(1, 0, 0, 22),
-                    TextSize = 14,
-                    TextXAlignment = Enum.TextXAlignment.Left,
-                    Parent = Dialog.Container,
-                })
-                New("UIPadding", {
-                    PaddingLeft = UDim.new(0, 8),
-                    PaddingRight = UDim.new(0, 8),
-                    Parent = SearchInput,
-                })
-                New("UICorner", {
-                    CornerRadius = UDim.new(0, Library.CornerRadius / 2),
-                    Parent = SearchInput,
-                })
-                New("UIStroke", {
-                    Color = "OutlineColor",
-                    Parent = SearchInput,
-                })
-
-                SearchInput:GetPropertyChangedSignal("Text"):Connect(function()
-                    Query = NormalizeSearch(SearchInput.Text:lower())
-                    Rebuild()
-                end)
-            end
-
-            local Rows = math.max(1, math.ceil(TotalValues / Columns))
-            local GridHeight = math.clamp(
-                Rows * CellHeight + (Rows - 1) * CellGap + 8,
-                CellHeight + 8,
-                8 * CellHeight + 7 * CellGap + 8
-            )
-
-            GridScroll = New("ScrollingFrame", {
-                AutomaticCanvasSize = Enum.AutomaticSize.Y,
-                BackgroundTransparency = 1,
-                CanvasSize = UDim2.fromOffset(0, 0),
-                LayoutOrder = 2,
-                ScrollBarImageColor3 = "OutlineColor",
-                ScrollBarThickness = 0,
-                ScrollingDirection = Enum.ScrollingDirection.Y,
-                Size = UDim2.new(1, 0, 0, GridHeight),
-                Parent = Dialog.Container,
-            })
-            New("UIGridLayout", {
-                CellPadding = UDim2.fromOffset(CellGap, CellGap),
-                CellSize = UDim2.new(1 / Columns, -math.ceil(CellGap * (Columns - 1) / Columns) - 1, 0, CellHeight),
-                SortOrder = Enum.SortOrder.LayoutOrder,
-                Parent = GridScroll,
-            })
-            New("UIPadding", {
-                PaddingBottom = UDim.new(0, 3),
-                PaddingLeft = UDim.new(0, 3),
-                PaddingRight = UDim.new(0, 3),
-                PaddingTop = UDim.new(0, 3),
-                Parent = GridScroll,
-            })
-
-            Dropdown.ModalRefresh = function()
-                if Dialog.Destroyed then
-                    Dropdown.Modal, Dropdown.ModalRefresh, Dropdown.ModalRebuild = nil, nil, nil
-                    return
-                end
-
-                for _, Cell in Cells do
-                    UpdateCell(Cell)
-                end
-                UpdateDescription()
-            end
-            Dropdown.ModalRebuild = function()
-                if Dialog.Destroyed then
-                    Dropdown.Modal, Dropdown.ModalRefresh, Dropdown.ModalRebuild = nil, nil, nil
-                    return
-                end
-
-                Rebuild()
-                UpdateDescription()
-            end
-
-            Dialog:Resize()
-            Rebuild()
-            UpdateDescription()
         end
 
         local ToggleDropdown = function()
@@ -12636,7 +13467,7 @@ do
                     DepboxContainer.Visible = false
                     Depbox.Visible = false
                     return
-                elseif Element.Type == "Dropdown" then
+                elseif Element.Type == "Dropdown" or Element.Type == "List" then
                     if typeof(Element.Value) == "table" then
                         if not Element.Value[Value] then
                             DepboxContainer.Visible = false
@@ -12758,14 +13589,14 @@ do
             Library:AddOutline(DepGroupboxContainer)
 
             DepGroupboxList = New("UIListLayout", {
-                Padding = UDim.new(0, 8),
+                Padding = UDim.new(0, 10),
                 Parent = DepGroupboxContainer,
             })
             New("UIPadding", {
-                PaddingBottom = UDim.new(0, 7),
-                PaddingLeft = UDim.new(0, 7),
-                PaddingRight = UDim.new(0, 7),
-                PaddingTop = UDim.new(0, 7),
+                PaddingBottom = UDim.new(0, 10),
+                PaddingLeft = UDim.new(0, 10),
+                PaddingRight = UDim.new(0, 10),
+                PaddingTop = UDim.new(0, 10),
                 Parent = DepGroupboxContainer,
             })
         end
@@ -12787,7 +13618,7 @@ do
         }
 
         function DepGroupbox:Resize()
-            DepGroupboxContainer.Size = UDim2.new(1, 0, 0, (DepGroupboxList.AbsoluteContentSize.Y / Library.DPIScale) + 18)
+            DepGroupboxContainer.Size = UDim2.new(1, 0, 0, (DepGroupboxList.AbsoluteContentSize.Y / Library.DPIScale) + 24)
         end
 
         function DepGroupbox:Update(CancelSearch)
@@ -12805,7 +13636,7 @@ do
                     DepGroupboxContainer.Visible = false
                     DepGroupbox.Visible = false
                     return
-                elseif Element.Type == "Dropdown" then
+                elseif Element.Type == "Dropdown" or Element.Type == "List" then
                     if typeof(Element.Value) == "table" then
                         if not Element.Value[Value] then
                             DepGroupboxContainer.Visible = false
@@ -15433,6 +16264,7 @@ function Library:CreateWindow(WindowInfo)
         local TabContainer
         local TabLeft
         local TabRight
+        local TabWide
 
         Icon = Library:GetCustomIcon(Icon)
         do
@@ -15588,6 +16420,25 @@ function Library:CreateWindow(WindowInfo)
                 })
             end
         end
+
+        --// Full width area above both columns (Tab:AddFullGroupbox) \\--
+        TabWide = New("Frame", {
+            AutomaticSize = Enum.AutomaticSize.Y,
+            BackgroundTransparency = 1,
+            Position = UDim2.fromScale(0, 0),
+            Size = UDim2.new(1, 0, 0, 0),
+            Parent = TabContainer,
+        })
+        New("UIListLayout", {
+            Padding = UDim.new(0, 2),
+            Parent = TabWide,
+        })
+        New("UIPadding", {
+            PaddingLeft = UDim.new(0, 2),
+            PaddingRight = UDim.new(0, 2),
+            PaddingTop = UDim.new(0, 2),
+            Parent = TabWide,
+        })
 
         --// Tab Table \\--
         local Tab = {
@@ -15765,21 +16616,33 @@ function Library:CreateWindow(WindowInfo)
         end
 
         function Tab:RefreshSides()
-            local Offset = WarningBoxHolder.Visible and WarningBox.Size.Y.Offset + 8 or 0
-            local function Apply(Side)
-                Side.Position = UDim2.new(Side.Position.X.Scale, 0, 0, Offset)
-                Side.Size = UDim2.new(0.5, -3, 1, -Offset)
+            local WarningOffset = WarningBoxHolder.Visible and WarningBox.Size.Y.Offset + 8 or 0
+
+            --// the full width area sits under the warning box, the two columns start under the full width area \--
+            local function Apply(Left, Right, Wide)
+                local Offset = WarningOffset
+                if Wide then
+                    Wide.Position = UDim2.new(0, 0, 0, WarningOffset)
+                    Offset += Wide.AbsoluteSize.Y / Library.DPIScale
+                end
+
+                for _, Side in { Left, Right } do
+                    Side.Position = UDim2.new(Side.Position.X.Scale, 0, 0, Offset)
+                    Side.Size = UDim2.new(0.5, -3, 1, -Offset)
+                end
             end
 
-            Apply(TabLeft)
-            Apply(TabRight)
+            Apply(TabLeft, TabRight, TabWide)
             if Tab.SubPages then
                 for _, SubPage in Tab.SubPages do
-                    Apply(SubPage.Sides[1])
-                    Apply(SubPage.Sides[2])
+                    Apply(SubPage.Sides[1], SubPage.Sides[2], SubPage.Wide)
                 end
             end
         end
+
+        TabWide:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
+            Tab:RefreshSides()
+        end)
 
         function Tab:Resize(ResizeWarningBox: boolean?)
             if ResizeWarningBox then
@@ -15808,6 +16671,10 @@ function Library:CreateWindow(WindowInfo)
 
         local function GetSideParent(Info)
             local SubSides = Info.SubPageSides
+            if Info.Side == 3 then
+                return Info.SubPageWide or TabWide
+            end
+
             if Info.Side == 1 then
                 return SubSides and SubSides[1] or TabLeft
             end
@@ -15995,14 +16862,14 @@ function Library:CreateWindow(WindowInfo)
                     Parent = TabboxHolder,
                 })
                 local List = New("UIListLayout", {
-                    Padding = UDim.new(0, 8),
+                    Padding = UDim.new(0, 10),
                     Parent = Container,
                 })
                 New("UIPadding", {
-                    PaddingBottom = UDim.new(0, 7),
-                    PaddingLeft = UDim.new(0, 7),
-                    PaddingRight = UDim.new(0, 7),
-                    PaddingTop = UDim.new(0, 7),
+                    PaddingBottom = UDim.new(0, 10),
+                    PaddingLeft = UDim.new(0, 10),
+                    PaddingRight = UDim.new(0, 10),
+                    PaddingTop = UDim.new(0, 10),
                     Parent = Container,
                 })
 
@@ -16068,7 +16935,7 @@ function Library:CreateWindow(WindowInfo)
                         return
                     end
 
-                    local ContentSize = (List.AbsoluteContentSize.Y / Library.DPIScale) + 14
+                    local ContentSize = (List.AbsoluteContentSize.Y / Library.DPIScale) + 20
                     if Tabbox.PoppedOut then
                         ContentSize = math.min(ContentSize, GetPopOutBodyMaxHeight(Tabbox, 35))
                     end
@@ -16371,14 +17238,14 @@ function Library:CreateWindow(WindowInfo)
                 })
 
                 GroupboxList = New("UIListLayout", {
-                    Padding = UDim.new(0, 8),
+                    Padding = UDim.new(0, 10),
                     Parent = GroupboxContainer,
                 })
                 New("UIPadding", {
-                    PaddingBottom = UDim.new(0, 7),
-                    PaddingLeft = UDim.new(0, 7),
-                    PaddingRight = UDim.new(0, 7),
-                    PaddingTop = UDim.new(0, 7),
+                    PaddingBottom = UDim.new(0, 10),
+                    PaddingLeft = UDim.new(0, 10),
+                    PaddingRight = UDim.new(0, 10),
+                    PaddingTop = UDim.new(0, 10),
                     Parent = GroupboxContainer,
                 })
             end
@@ -16418,7 +17285,7 @@ function Library:CreateWindow(WindowInfo)
                 end
 
                 local TopSize = (GroupboxTop.AbsoluteSize.Y / Library.DPIScale)
-                local ContainerSize = (GroupboxList.AbsoluteContentSize.Y / Library.DPIScale) + 14
+                local ContainerSize = (GroupboxList.AbsoluteContentSize.Y / Library.DPIScale) + 20
                 if Groupbox.PoppedOut then
                     ContainerSize = math.min(ContainerSize, GetPopOutBodyMaxHeight(Groupbox, TopSize + 1))
                 end
@@ -16631,6 +17498,14 @@ function Library:CreateWindow(WindowInfo)
         end
 
         --// Sub Pages \\--
+        --// Groupbox that spans both columns: Tab:AddFullGroupbox({ Name = "Quick actions" }) \\--
+        function Tab:AddFullGroupbox(GroupInfo)
+            GroupInfo = typeof(GroupInfo) == "table" and GroupInfo or { Name = tostring(GroupInfo) }
+            GroupInfo.Side = 3
+
+            return Tab:AddGroupbox(GroupInfo)
+        end
+
         function Tab:SetSubPageButtonsVisible(Visible: boolean)
             if not Tab.SubPages then
                 return
@@ -16707,6 +17582,27 @@ function Library:CreateWindow(WindowInfo)
             })
             local SubLeft = CreateSide(SubContainer, false)
             local SubRight = CreateSide(SubContainer, true)
+
+            local SubWide = New("Frame", {
+                AutomaticSize = Enum.AutomaticSize.Y,
+                BackgroundTransparency = 1,
+                Position = UDim2.fromScale(0, 0),
+                Size = UDim2.new(1, 0, 0, 0),
+                Parent = SubContainer,
+            })
+            New("UIListLayout", {
+                Padding = UDim.new(0, 2),
+                Parent = SubWide,
+            })
+            New("UIPadding", {
+                PaddingLeft = UDim.new(0, 2),
+                PaddingRight = UDim.new(0, 2),
+                PaddingTop = UDim.new(0, 2),
+                Parent = SubWide,
+            })
+            SubWide:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
+                Tab:RefreshSides()
+            end)
 
             --// Button (displayed on the left of the search bar) \\--
             local Style = SubPageStyle
@@ -16796,6 +17692,7 @@ function Library:CreateWindow(WindowInfo)
                 Button = Button,
                 Container = SubContainer,
                 Sides = { SubLeft, SubRight },
+                Wide = SubWide,
             }
 
             local function ApplyCorner()
@@ -16937,14 +17834,23 @@ function Library:CreateWindow(WindowInfo)
                 GroupInfo = typeof(GroupInfo) == "table" and GroupInfo or { Name = tostring(GroupInfo) }
                 GroupInfo.SubPage = SubPage
                 GroupInfo.SubPageSides = SubPage.Sides
+                GroupInfo.SubPageWide = SubPage.Wide
 
                 return Tab:AddGroupbox(GroupInfo)
+            end
+
+            function SubPage:AddFullGroupbox(GroupInfo)
+                GroupInfo = typeof(GroupInfo) == "table" and GroupInfo or { Name = tostring(GroupInfo) }
+                GroupInfo.Side = 3
+
+                return SubPage:AddGroupbox(GroupInfo)
             end
 
             function SubPage:AddTabbox(TabboxInfo)
                 TabboxInfo = typeof(TabboxInfo) == "table" and TabboxInfo or {}
                 TabboxInfo.SubPage = SubPage
                 TabboxInfo.SubPageSides = SubPage.Sides
+                TabboxInfo.SubPageWide = SubPage.Wide
 
                 return AddTabbox(Tab, TabboxInfo)
             end
@@ -19372,7 +20278,7 @@ function Library:SetSettingsTab(Tab, Info)
                 Data[Idx] = { Type = OptionType, Value = Option.Value }
             elseif OptionType == "RangeSlider" then
                 Data[Idx] = { Type = OptionType, Low = Option.Low, High = Option.High }
-            elseif OptionType == "Dropdown" and not Option.SpecialType then
+            elseif (OptionType == "Dropdown" or OptionType == "List") and not Option.SpecialType then
                 if Option.Multi then
                     local List = {}
                     for Value, Active in Option.Value do
@@ -19416,7 +20322,7 @@ function Library:SetSettingsTab(Tab, Info)
                     Object:SetValue(Entry.Value)
                 elseif EntryType == "RangeSlider" then
                     Object:SetValue(Entry.Low, Entry.High)
-                elseif EntryType == "Dropdown" then
+                elseif EntryType == "Dropdown" or EntryType == "List" then
                     if Entry.Multi then
                         local Map = {}
                         for _, Value in Entry.Value or {} do
@@ -19617,7 +20523,8 @@ function Library:SetSettingsTab(Tab, Info)
             { "FontColor", "Text" },
         }
         local Presets = {
-            Default = { BackgroundColor = "0f0f0f", MainColor = "191919", AccentColor = "7d55ff", OutlineColor = "282828", FontColor = "ffffff" },
+            Default = { BackgroundColor = "0d0d11", MainColor = "17171e", AccentColor = "6e67ff", OutlineColor = "25252f", FontColor = "f0f0f6" },
+            Classic = { BackgroundColor = "0f0f0f", MainColor = "191919", AccentColor = "7d55ff", OutlineColor = "282828", FontColor = "ffffff" },
             Vitality = { BackgroundColor = "0e0b0d", MainColor = "181215", AccentColor = "e0284f", OutlineColor = "2a2024", FontColor = "ffffff" },
             Ocean = { BackgroundColor = "0b1218", MainColor = "111b24", AccentColor = "3aa0ff", OutlineColor = "1e2d3b", FontColor = "e8f3ff" },
             Mint = { BackgroundColor = "0c1210", MainColor = "131c18", AccentColor = "2ee6a6", OutlineColor = "1f2e28", FontColor = "eafff6" },
@@ -19625,11 +20532,11 @@ function Library:SetSettingsTab(Tab, Info)
             Amber = { BackgroundColor = "130f0a", MainColor = "1c1610", AccentColor = "ffb02e", OutlineColor = "2d2418", FontColor = "fff6e5" },
             Light = { BackgroundColor = "f2f2f4", MainColor = "ffffff", AccentColor = "6d4aff", OutlineColor = "d4d4da", FontColor = "1b1b1f", Light = true },
         }
-        local PresetNames = { "Default", "Vitality", "Ocean", "Mint", "Rose", "Amber", "Light" }
-        local FontNames = { "Code", "RobotoMono", "Roboto", "Ubuntu", "Gotham", "GothamMedium", "SourceSans", "Arimo", "Nunito" }
+        local PresetNames = { "Default", "Classic", "Vitality", "Ocean", "Mint", "Rose", "Amber", "Light" }
+        local FontNames = { "BuilderSansMedium", "BuilderSans", "GothamMedium", "Gotham", "Ubuntu", "Roboto", "SourceSans", "Arimo", "Nunito", "Code", "RobotoMono" }
 
         local Applying = true
-        local FontName = "Code"
+        local FontName = "BuilderSansMedium"
 
         local function RefreshTheme()
             Library:UpdateColorsUsingRegistry()
@@ -19890,6 +20797,14 @@ function Library:SetSettingsTab(Tab, Info)
                 Library.ShowCustomCursor = Value
             end),
             Callback = Changed("Octo_UI_Cursor"),
+        })
+        Box:AddToggle("Octo_UI_GroupDrag", {
+            Text = "Groupbox drag (pop out)",
+            Tooltip = "Drag a groupbox header to float it. Turning this off docks floating groupboxes again.",
+            Default = Bind("Octo_UI_GroupDrag", Library.GroupboxDrag, function(Value)
+                Library:SetGroupboxDrag(Value)
+            end),
+            Callback = Changed("Octo_UI_GroupDrag"),
         })
         Box:AddDropdown("Octo_UI_Animations", {
             Text = "Animations",
