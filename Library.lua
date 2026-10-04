@@ -11,6 +11,7 @@ local TextService: TextService = cloneref(game:GetService("TextService"))
 local Teams: Teams = cloneref(game:GetService("Teams"))
 local TweenService: TweenService = cloneref(game:GetService("TweenService"))
 local HttpService: HttpService = cloneref(game:GetService("HttpService"))
+local LogService = cloneref(game:GetService("LogService"))
 local MarketplaceService: MarketplaceService = cloneref(game:GetService("MarketplaceService"))
 local Stats = cloneref(game:GetService("Stats"))
 
@@ -4767,7 +4768,7 @@ function Library:AddContextMenu(
                 )
             end
 
-            local HolderAllowed = Library:IsInsideFrame(Library.WindowContainer, Holder)
+            local HolderAllowed = Library.WindowContainer ~= nil and Library:IsInsideFrame(Library.WindowContainer, Holder)
             if not HolderAllowed then
                 for _, Surface in Library.DraggableElements do
                     if not (Surface and Library:IsInsideFrame(Surface, Holder)) then
@@ -14915,6 +14916,1269 @@ function Library:CreateWatermark(Info)
     return Watermark
 end
 
+--// Console: built-in output window. Library.Console:Print() / Warn() / Error() / Success() / Debug() / Log(level, ...) \\--
+function Library:CreateConsole(Info)
+    if Library.Console then
+        return Library.Console
+    end
+
+    Info = typeof(Info) == "table" and Info or {}
+
+    local Folder = tostring(Info.Folder or "Octo")
+    local SettingsPath = Folder .. "/console.json"
+    local LogFolder = Folder .. "/logs"
+
+    local HasFS = typeof(writefile) == "function"
+        and typeof(readfile) == "function"
+        and typeof(isfile) == "function"
+        and typeof(isfolder) == "function"
+        and typeof(makefolder) == "function"
+
+    local StartClock = os.clock()
+
+    local Levels = {
+        info = {
+            Tag = "INFO",
+            Name = "Info",
+            Color = function()
+                return Library.Scheme.FontColor
+            end,
+        },
+        warn = { Tag = "WARN", Name = "Warn", Color = Color3.fromRGB(255, 176, 46) },
+        error = { Tag = "ERROR", Name = "Error", Color = Color3.fromRGB(255, 90, 90) },
+        success = { Tag = "OK", Name = "Success", Color = Color3.fromRGB(80, 220, 120) },
+        debug = { Tag = "DEBUG", Name = "Debug", Color = Color3.fromRGB(135, 145, 180) },
+    }
+    local LevelOrder = { "info", "warn", "error", "success", "debug" }
+
+    local StackModes = { "Off", "Consecutive", "All" }
+    local StampModes = { "Off", "Time", "Time + ms", "Uptime" }
+
+    --// Settings (remembered between sessions) \\--
+    local Defaults = {
+        Stack = "Consecutive",
+        AutoScroll = true,
+        Timestamps = "Time",
+        ShowTag = true,
+        Wrap = true,
+        TextSize = 14,
+        MaxLines = 400,
+        Capture = false,
+        Mirror = false,
+        ClickCopy = false,
+    }
+    local Settings = {}
+    for Key, Value in Defaults do
+        Settings[Key] = Value
+    end
+    Settings.Levels = { info = true, warn = true, error = true, success = true, debug = true }
+
+    if HasFS and isfile(SettingsPath) then
+        local Ok, Data = pcall(function()
+            return HttpService:JSONDecode(readfile(SettingsPath))
+        end)
+
+        if Ok and typeof(Data) == "table" then
+            for Key, Default in Defaults do
+                if typeof(Data[Key]) == typeof(Default) then
+                    Settings[Key] = Data[Key]
+                end
+            end
+
+            if typeof(Data.Levels) == "table" then
+                for _, Name in LevelOrder do
+                    Settings.Levels[Name] = table.find(Data.Levels, Name) ~= nil
+                end
+            end
+
+            if not table.find(StackModes, Settings.Stack) then
+                Settings.Stack = Defaults.Stack
+            end
+            if not table.find(StampModes, Settings.Timestamps) then
+                Settings.Timestamps = Defaults.Timestamps
+            end
+            Settings.TextSize = math.clamp(Settings.TextSize, 10, 20)
+            Settings.MaxLines = math.clamp(math.floor(Settings.MaxLines), 50, 2000)
+        end
+    end
+
+    local SaveToken = 0
+    local function SaveSettings()
+        if not HasFS then
+            return
+        end
+
+        SaveToken += 1
+        local Token = SaveToken
+
+        task.delay(0.6, function()
+            if Token ~= SaveToken then
+                return
+            end
+
+            local Data = {}
+            for Key in Defaults do
+                Data[Key] = Settings[Key]
+            end
+
+            Data.Levels = {}
+            for _, Name in LevelOrder do
+                if Settings.Levels[Name] then
+                    table.insert(Data.Levels, Name)
+                end
+            end
+
+            if not isfolder(Folder) then
+                pcall(makefolder, Folder)
+            end
+            pcall(writefile, SettingsPath, HttpService:JSONEncode(Data))
+        end)
+    end
+
+    --// State \\--
+    local Entries = {}
+    local ByKey = {}
+    local IdCounter = 0
+    local Query = ""
+
+    local Console = {
+        Entries = Entries,
+        Settings = Settings,
+
+        Visible = false,
+        Paused = false,
+        Destroyed = false,
+    }
+
+    local Built = false
+    local Dirty = false
+    local StatusDirty = false
+    local Stick = true
+    local ScrollQueued = false
+    local Syncing = false
+
+    local Frame, Output, SearchBox, StatusLabel, CountLabel, JumpButton
+    local SettingsOverlay, PauseButton
+    local ControlIds = {}
+
+    --// Formatting \\--
+    local function LevelHex(Name: string): string
+        local Color = Levels[Name].Color
+        if typeof(Color) == "function" then
+            Color = Color()
+        end
+
+        return Color:ToHex()
+    end
+
+    local function FormatEntry(Entry, Rich: boolean): string
+        local Parts = {}
+        local DimHex = Library:GetDarkerColor(Library.Scheme.FontColor):ToHex()
+
+        local Mode = Settings.Timestamps
+        if Mode ~= "Off" then
+            local Stamp
+            if Mode == "Uptime" then
+                Stamp = string.format("%.2fs", Entry.Clock - StartClock)
+            else
+                Stamp = os.date("%H:%M:%S", Entry.Time)
+                if Mode == "Time + ms" then
+                    Stamp ..= string.format(".%03d", math.floor((Entry.Clock % 1) * 1000))
+                end
+            end
+
+            table.insert(Parts, Rich and string.format('<font color="#%s">%s</font>', DimHex, Stamp) or Stamp)
+        end
+
+        if Settings.ShowTag then
+            local Tag = Levels[Entry.Level].Tag
+            table.insert(Parts, Rich and string.format('<font color="#%s"><b>%s</b></font>', LevelHex(Entry.Level), Tag) or Tag)
+        end
+
+        local Message = Entry.Text
+        if not Rich then
+            Message = StripRichText(Message)
+        elseif Entry.Level ~= "info" then
+            Message = string.format('<font color="#%s">%s</font>', LevelHex(Entry.Level), Message)
+        end
+        table.insert(Parts, Message)
+
+        local Text = table.concat(Parts, " ")
+        if Entry.Count > 1 then
+            if Rich then
+                Text ..= string.format(' <font color="#%s"><b>x%d</b></font>', Library.Scheme.AccentColor:ToHex(), Entry.Count)
+            else
+                Text ..= " x" .. Entry.Count
+            end
+        end
+
+        return Text
+    end
+
+    local function Passes(Entry): boolean
+        if not Settings.Levels[Entry.Level] then
+            return false
+        end
+
+        if Query ~= "" and not TryFuzzyMatch(FormatEntry(Entry, true), Query) then
+            return false
+        end
+
+        return true
+    end
+
+    local function UpdateRow(Entry)
+        local Row, Label = Entry.Row, Entry.Label
+        if not (Row and Row.Parent) then
+            return
+        end
+
+        local Text = FormatEntry(Entry, true)
+        if Query ~= "" then
+            Text = BuildHighlightedText(Text, Query) or Text
+        end
+
+        Label.Text = Text
+        Label.TextSize = Settings.TextSize
+        Label.TextWrapped = Settings.Wrap
+        Label.TextTruncate = Settings.Wrap and Enum.TextTruncate.None or Enum.TextTruncate.AtEnd
+        Row.Visible = Passes(Entry)
+    end
+
+    local function IsAtBottom(): boolean
+        return Output.CanvasPosition.Y >= Output.AbsoluteCanvasSize.Y - Output.AbsoluteWindowSize.Y - 6
+    end
+
+    local function ScrollToBottom()
+        if ScrollQueued or not Output then
+            return
+        end
+
+        ScrollQueued = true
+        task.spawn(function()
+            RunService.RenderStepped:Wait() --// let the layout update first
+            ScrollQueued = false
+
+            if Output and Output.Parent then
+                Output.CanvasPosition = Vector2.new(0, math.max(0, Output.AbsoluteCanvasSize.Y))
+            end
+        end)
+    end
+
+    local function CreateRow(Entry)
+        local Row = New("Frame", {
+            AutomaticSize = Enum.AutomaticSize.Y,
+            BackgroundColor3 = "FontColor",
+            BackgroundTransparency = 1,
+            LayoutOrder = Entry.Id,
+            Size = UDim2.new(1, 0, 0, 0),
+            Visible = false,
+            Parent = Output,
+        })
+        New("UICorner", {
+            CornerRadius = UDim.new(0, Library.CornerRadius / 3),
+            Parent = Row,
+        })
+        New("UIPadding", {
+            PaddingBottom = UDim.new(0, 1),
+            PaddingLeft = UDim.new(0, 4),
+            PaddingRight = UDim.new(0, 4),
+            PaddingTop = UDim.new(0, 1),
+            Parent = Row,
+        })
+
+        local Label = New("TextLabel", {
+            AutomaticSize = Enum.AutomaticSize.Y,
+            BackgroundTransparency = 1,
+            Size = UDim2.new(1, 0, 0, 0),
+            Text = "",
+            TextSize = Settings.TextSize,
+            TextWrapped = Settings.Wrap,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            TextYAlignment = Enum.TextYAlignment.Top,
+            Parent = Row,
+        })
+
+        Row.MouseEnter:Connect(function()
+            TweenService:Create(Row, Library.TweenInfo, { BackgroundTransparency = 0.94 }):Play()
+        end)
+        Row.MouseLeave:Connect(function()
+            TweenService:Create(Row, Library.TweenInfo, { BackgroundTransparency = 1 }):Play()
+        end)
+
+        --// right click copies the line (left click too when "Click line to copy" is on) \\--
+        Row.InputBegan:Connect(function(Input: InputObject)
+            local RightClick = Input.UserInputType == Enum.UserInputType.MouseButton2
+                and Input.UserInputState == Enum.UserInputState.Begin
+            local LeftClick = Settings.ClickCopy and IsClickInput(Input)
+
+            if RightClick or LeftClick then
+                CopyToClipboard(FormatEntry(Entry, false))
+
+                Row.BackgroundColor3 = Library.Scheme.AccentColor
+                Row.BackgroundTransparency = 0.6
+                TweenService:Create(Row, TweenInfo.new(0.4), { BackgroundTransparency = 1 }):Play()
+                task.delay(0.45, function()
+                    if Row.Parent then
+                        Row.BackgroundColor3 = Library.Scheme.FontColor
+                    end
+                end)
+            end
+        end)
+
+        Entry.Row, Entry.Label = Row, Label
+        UpdateRow(Entry)
+    end
+
+    local function UpdateStatus()
+        StatusDirty = false
+        if not StatusLabel then
+            return
+        end
+
+        local Hidden = 0
+        for _, Entry in Entries do
+            if Entry.Row and not Entry.Row.Visible then
+                Hidden += 1
+            end
+        end
+
+        StatusLabel.Text = string.format(
+            "%d lines%s%s",
+            #Entries,
+            Hidden > 0 and string.format(" · %d hidden", Hidden) or "",
+            Console.Paused and " · paused" or ""
+        )
+        CountLabel.Text = tostring(#Entries)
+    end
+
+    local function Flush()
+        if not Built then
+            return
+        end
+
+        local Start = 1
+        for Index = #Entries, 1, -1 do
+            if Entries[Index].Row then
+                Start = Index + 1
+                break
+            end
+        end
+
+        local Created = 0
+        for Index = Start, #Entries do
+            if Created >= 120 then
+                return --// keeps Dirty set, the rest follows next frame
+            end
+
+            CreateRow(Entries[Index])
+            Created += 1
+        end
+
+        Dirty = false
+        StatusDirty = true
+
+        if Stick and Settings.AutoScroll then
+            ScrollToBottom()
+        end
+    end
+
+    local function Trim()
+        while #Entries > Settings.MaxLines do
+            local Old = table.remove(Entries, 1)
+            if Old.Row then
+                Old.Row:Destroy()
+            end
+            if ByKey[Old.Key] == Old then
+                ByKey[Old.Key] = nil
+            end
+        end
+
+        StatusDirty = true
+    end
+
+    function Console:Refresh()
+        for _, Entry in Entries do
+            if Entry.Row then
+                UpdateRow(Entry)
+            end
+        end
+
+        StatusDirty = true
+    end
+
+    --// Output API \\--
+    function Console:Add(Level: string, Text: any)
+        if Console.Destroyed then
+            return nil
+        end
+
+        if not Levels[Level] then
+            Level = "info"
+        end
+        Text = tostring(Text)
+
+        local Key = Level .. "\0" .. Text
+        local Existing
+        if Settings.Stack == "Consecutive" then
+            local Last = Entries[#Entries]
+            if Last and Last.Key == Key then
+                Existing = Last
+            end
+        elseif Settings.Stack == "All" then
+            Existing = ByKey[Key]
+        end
+
+        if Settings.Mirror and not Settings.Capture then
+            local Plain = StripRichText(Text)
+            if Level == "warn" or Level == "error" then
+                warn(Plain)
+            else
+                print(Plain)
+            end
+        end
+
+        if Existing then
+            Existing.Count += 1
+            Existing.Time = os.time()
+            Existing.Clock = os.clock()
+
+            if Existing.Row then
+                UpdateRow(Existing)
+            end
+
+            StatusDirty = true
+            return Existing
+        end
+
+        IdCounter += 1
+        local Entry = {
+            Id = IdCounter,
+            Level = Level,
+            Text = Text,
+            Key = Key,
+            Count = 1,
+            Time = os.time(),
+            Clock = os.clock(),
+        }
+
+        table.insert(Entries, Entry)
+        ByKey[Key] = Entry
+        Trim()
+
+        Dirty = true
+        return Entry
+    end
+
+    local function Join(...): string
+        local Packed = table.pack(...)
+        local Out = {}
+
+        for Index = 1, Packed.n do
+            local Value = Packed[Index]
+            if typeof(Value) == "string" then
+                Out[Index] = Value --// strings keep their rich text / <c> markup
+            elseif typeof(Value) == "table" then
+                local Ok, Json = pcall(HttpService.JSONEncode, HttpService, Value)
+                Out[Index] = EscapeRichText(Ok and Json or tostring(Value))
+            else
+                Out[Index] = EscapeRichText(tostring(Value))
+            end
+        end
+
+        return table.concat(Out, " ")
+    end
+
+    function Console:Log(Level: string, ...)
+        return Console:Add(Level, Join(...))
+    end
+    function Console:Print(...)
+        return Console:Add("info", Join(...))
+    end
+    Console.Info = Console.Print
+    function Console:Warn(...)
+        return Console:Add("warn", Join(...))
+    end
+    function Console:Error(...)
+        return Console:Add("error", Join(...))
+    end
+    function Console:Success(...)
+        return Console:Add("success", Join(...))
+    end
+    function Console:Debug(...)
+        return Console:Add("debug", Join(...))
+    end
+
+    function Console:Clear()
+        for _, Entry in Entries do
+            if Entry.Row then
+                Entry.Row:Destroy()
+            end
+        end
+
+        table.clear(Entries)
+        table.clear(ByKey)
+        StatusDirty = true
+    end
+
+    function Console:GetText(): string
+        local Lines = {}
+        for _, Entry in Entries do
+            table.insert(Lines, FormatEntry(Entry, false))
+        end
+
+        return table.concat(Lines, "\n")
+    end
+
+    function Console:Copy()
+        if not setclipboard then
+            return Library:Notify({ Title = "Console", Description = "Your executor has no clipboard function.", Time = 3 })
+        end
+
+        setclipboard(Console:GetText())
+        Library:Notify({ Title = "Console", Description = string.format("Copied %d lines.", #Entries), Time = 2 })
+    end
+
+    function Console:Save(): string?
+        if not HasFS then
+            Library:Notify({ Title = "Console", Description = "Your executor has no file functions.", Time = 3 })
+            return nil
+        end
+
+        for _, Path in { Folder, LogFolder } do
+            if not isfolder(Path) then
+                pcall(makefolder, Path)
+            end
+        end
+
+        local Path = string.format("%s/console_%s.txt", LogFolder, os.date("%Y%m%d_%H%M%S"))
+        local Ok = pcall(writefile, Path, Console:GetText())
+        Library:Notify({
+            Title = "Console",
+            Description = Ok and ("Saved to " .. Library:Copyable(Path)) or "Could not save the log.",
+            Time = 4,
+        })
+
+        return Ok and Path or nil
+    end
+
+    --// Options \\--
+    local CaptureConnection
+    local function UpdateCapture()
+        if Settings.Capture and not CaptureConnection then
+            CaptureConnection = LogService.MessageOut:Connect(function(Message, MessageType)
+                local Level = "info"
+                if MessageType == Enum.MessageType.MessageWarning then
+                    Level = "warn"
+                elseif MessageType == Enum.MessageType.MessageError then
+                    Level = "error"
+                elseif MessageType == Enum.MessageType.MessageInfo then
+                    Level = "debug"
+                end
+
+                Console:Add(Level, EscapeRichText(Message))
+            end)
+        elseif not Settings.Capture and CaptureConnection then
+            CaptureConnection:Disconnect()
+            CaptureConnection = nil
+        end
+    end
+
+    local function SyncControl(Key: string)
+        local Idx = ControlIds[Key]
+        local Object = Idx and (Toggles[Idx] or Options[Idx])
+        if not Object then
+            return
+        end
+
+        local Value = Settings[Key]
+        if Key == "Levels" then
+            Value = {}
+            for _, Name in LevelOrder do
+                if Settings.Levels[Name] then
+                    Value[Levels[Name].Name] = true
+                end
+            end
+        end
+
+        Syncing = true
+        pcall(Object.SetValue, Object, Value)
+        Syncing = false
+    end
+
+    function Console:SetOption(Key: string, Value: any)
+        if Settings[Key] == nil then
+            return
+        end
+
+        if Key == "Levels" then
+            local Map = {}
+            for _, Name in LevelOrder do
+                Map[Name] = typeof(Value) == "table" and Value[Name] == true
+            end
+            Value = Map
+        elseif Key == "Stack" then
+            if not table.find(StackModes, Value) then
+                return
+            end
+        elseif Key == "Timestamps" then
+            if not table.find(StampModes, Value) then
+                return
+            end
+        elseif Key == "TextSize" then
+            Value = math.clamp(math.floor(tonumber(Value) or 14), 10, 20)
+        elseif Key == "MaxLines" then
+            Value = math.clamp(math.floor(tonumber(Value) or 400), 50, 2000)
+        elseif typeof(Value) ~= typeof(Defaults[Key]) then
+            return
+        end
+
+        Settings[Key] = Value
+
+        if Key == "Timestamps" or Key == "ShowTag" or Key == "Levels" or Key == "Wrap" or Key == "TextSize" then
+            Console:Refresh()
+        elseif Key == "MaxLines" then
+            Trim()
+        elseif Key == "Capture" then
+            UpdateCapture()
+        elseif Key == "AutoScroll" and Value and Built then
+            Stick = true
+            ScrollToBottom()
+        end
+
+        SyncControl(Key)
+        SaveSettings()
+    end
+
+    function Console:SetPaused(Paused: boolean)
+        Console.Paused = Paused == true
+        if not Console.Paused then
+            Dirty = true
+        end
+
+        if PauseButton then
+            local Icon = Library:GetIcon(Console.Paused and "play" or "pause")
+            if Icon then
+                Library:ApplyLucideIcon(PauseButton, Icon)
+            end
+            PauseButton.ImageColor3 = Console.Paused and Library.Scheme.AccentColor or Library.Scheme.FontColor
+            Library.Registry[PauseButton].ImageColor3 = Console.Paused and "AccentColor" or "FontColor"
+        end
+
+        StatusDirty = true
+    end
+
+    --// Settings popup \\--
+    local Panel
+    local function BuildSettings()
+        if Panel then
+            return
+        end
+
+        local Card = New("TextButton", {
+            AnchorPoint = Vector2.new(1, 0),
+            AutoButtonColor = false,
+            BackgroundColor3 = "BackgroundColor",
+            Position = UDim2.new(1, -8, 0, 8),
+            Size = UDim2.new(0, 290, 1, -16),
+            Text = "",
+            Parent = SettingsOverlay,
+        })
+        table.insert(
+            Library.Corners,
+            New("UICorner", {
+                CornerRadius = UDim.new(0, Library.CornerRadius),
+                Parent = Card,
+            })
+        )
+        Library:AddOutline(Card)
+
+        New("TextLabel", {
+            BackgroundTransparency = 1,
+            Position = UDim2.fromOffset(12, 0),
+            Size = UDim2.new(1, -44, 0, 34),
+            Text = "Console settings",
+            TextSize = 15,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            Parent = Card,
+        })
+        local CloseSettings = New("ImageButton", {
+            AnchorPoint = Vector2.new(1, 0.5),
+            BackgroundTransparency = 1,
+            ImageColor3 = "FontColor",
+            ImageTransparency = 0.45,
+            Position = UDim2.new(1, -10, 0, 17),
+            Size = UDim2.fromOffset(16, 16),
+            Parent = Card,
+        })
+        local CloseIconData = Library:GetIcon("x")
+        if CloseIconData then
+            Library:ApplyLucideIcon(CloseSettings, CloseIconData)
+        end
+        CloseSettings.MouseButton1Click:Connect(function()
+            SettingsOverlay.Visible = false
+        end)
+        Library:MakeLine(Card, {
+            Position = UDim2.fromOffset(0, 34),
+            Size = UDim2.new(1, 0, 0, 1),
+        })
+
+        local Body = New("ScrollingFrame", {
+            AutomaticCanvasSize = Enum.AutomaticSize.Y,
+            BackgroundTransparency = 1,
+            CanvasSize = UDim2.fromOffset(0, 0),
+            Position = UDim2.fromOffset(0, 35),
+            ScrollBarThickness = 0,
+            Size = UDim2.new(1, 0, 1, -35),
+            Parent = Card,
+        })
+        New("UIListLayout", {
+            Padding = UDim.new(0, 10),
+            Parent = Body,
+        })
+        New("UIPadding", {
+            PaddingBottom = UDim.new(0, 10),
+            PaddingLeft = UDim.new(0, 10),
+            PaddingRight = UDim.new(0, 10),
+            PaddingTop = UDim.new(0, 10),
+            Parent = Body,
+        })
+
+        Panel = {
+            Container = Body,
+            Elements = {},
+            DependencyBoxes = {},
+            Destroyed = false,
+            Resize = function() end,
+        }
+        setmetatable(Panel, BaseGroupbox)
+
+        local function Toggle(Key: string, Text: string, Tooltip: string?)
+            local Idx = "Octo_Console_" .. Key
+            ControlIds[Key] = Idx
+
+            Panel:AddToggle(Idx, {
+                Text = Text,
+                Tooltip = Tooltip,
+                Default = Settings[Key],
+                Callback = function(Value)
+                    if not Syncing then
+                        Console:SetOption(Key, Value)
+                    end
+                end,
+            })
+        end
+
+        local function Dropdown(Key: string, Text: string, Values: { string })
+            local Idx = "Octo_Console_" .. Key
+            ControlIds[Key] = Idx
+
+            Panel:AddDropdown(Idx, {
+                Text = Text,
+                Values = Values,
+                Default = Settings[Key],
+                Callback = function(Value)
+                    if not Syncing and Value then
+                        Console:SetOption(Key, Value)
+                    end
+                end,
+            })
+        end
+
+        local function Slider(Key: string, Text: string, Min: number, Max: number, Suffix: string?)
+            local Idx = "Octo_Console_" .. Key
+            ControlIds[Key] = Idx
+
+            Panel:AddSlider(Idx, {
+                Text = Text,
+                Default = Settings[Key],
+                Min = Min,
+                Max = Max,
+                Rounding = 0,
+                Suffix = Suffix or "",
+                Callback = function(Value)
+                    if not Syncing then
+                        Console:SetOption(Key, Value)
+                    end
+                end,
+            })
+        end
+
+        Panel:AddDivider("Output")
+        Dropdown("Stack", "Stack identical output", StackModes)
+        Dropdown("Timestamps", "Timestamps", StampModes)
+        Toggle("ShowTag", "Show level tag")
+        Toggle("Wrap", "Word wrap")
+        Toggle("AutoScroll", "Auto-scroll to latest")
+        Slider("TextSize", "Text size", 10, 20)
+        Slider("MaxLines", "Max lines", 50, 2000)
+
+        local LevelValues = {}
+        local LevelDefaults = {}
+        for _, Name in LevelOrder do
+            table.insert(LevelValues, Levels[Name].Name)
+            if Settings.Levels[Name] then
+                table.insert(LevelDefaults, Levels[Name].Name)
+            end
+        end
+        ControlIds.Levels = "Octo_Console_Levels"
+        Panel:AddDropdown("Octo_Console_Levels", {
+            Text = "Show levels",
+            Values = LevelValues,
+            Multi = true,
+            AllowNull = true,
+            Default = LevelDefaults,
+            Callback = function(Value)
+                if Syncing then
+                    return
+                end
+
+                local Map = {}
+                for _, Name in LevelOrder do
+                    Map[Name] = Value[Levels[Name].Name] == true
+                end
+                Console:SetOption("Levels", Map)
+            end,
+        })
+
+        Panel:AddDivider("Behavior")
+        Toggle("ClickCopy", "Click a line to copy it", "Right click always copies a line")
+        Toggle("Capture", "Capture Roblox output", "Shows print / warn / error messages of the game in this console")
+        Toggle("Mirror", "Mirror to Roblox output", "Also prints console lines to the Roblox output (ignored while capturing)")
+
+        Panel:AddDivider("Actions")
+        local Row = Panel:AddRow()
+        Row:AddButton({ Text = "Copy all", Func = function() Console:Copy() end })
+        Row:AddButton({ Text = "Save log", Func = function() Console:Save() end })
+        Panel:AddButton({
+            Text = "Reset settings",
+            DoubleClick = true,
+            Func = function()
+                for Key, Value in Defaults do
+                    Console:SetOption(Key, Value)
+                end
+                Console:SetOption("Levels", { info = true, warn = true, error = true, success = true, debug = true })
+            end,
+        })
+    end
+
+    --// Window \\--
+    local function CreateIconButton(Parent: GuiObject, Order: number, IconName: string, Fallback: string, Callback: () -> ())
+        local Button = New("ImageButton", {
+            BackgroundTransparency = 1,
+            ImageColor3 = "FontColor",
+            ImageTransparency = 0.45,
+            LayoutOrder = Order,
+            Size = UDim2.fromOffset(18, 18),
+            Parent = Parent,
+        })
+
+        local Icon = Library:GetIcon(IconName)
+        if Icon then
+            Library:ApplyLucideIcon(Button, Icon)
+        else
+            New("TextLabel", {
+                BackgroundTransparency = 1,
+                Size = UDim2.fromScale(1, 1),
+                Text = Fallback,
+                TextSize = 14,
+                Parent = Button,
+            })
+        end
+
+        Button.MouseEnter:Connect(function()
+            TweenService:Create(Button, Library.TweenInfo, { ImageTransparency = 0 }):Play()
+        end)
+        Button.MouseLeave:Connect(function()
+            TweenService:Create(Button, Library.TweenInfo, { ImageTransparency = 0.45 }):Play()
+        end)
+        Button.MouseButton1Click:Connect(Callback)
+
+        return Button
+    end
+
+    local function BuildUI()
+        if Built then
+            return
+        end
+        Built = true
+
+        Frame = New("Frame", {
+            BackgroundColor3 = "BackgroundColor",
+            Position = typeof(Info.Position) == "UDim2" and Info.Position or UDim2.fromOffset(60, 110),
+            Size = UDim2.fromOffset(tonumber(Info.Width) or 540, tonumber(Info.Height) or 320),
+            Visible = false,
+            ZIndex = 16,
+            Parent = ScreenGui,
+        })
+        table.insert(
+            Library.Corners,
+            New("UICorner", {
+                CornerRadius = UDim.new(0, Library.CornerRadius),
+                Parent = Frame,
+            })
+        )
+        Library:AddOutline(Frame)
+
+        local FrameScale = New("UIScale", {
+            Parent = Frame,
+        })
+        table.insert(Library.Scales, FrameScale)
+        FrameScale.Scale = Library.DPIScale
+
+        --// Header \\--
+        local Header = New("Frame", {
+            BackgroundTransparency = 1,
+            Size = UDim2.new(1, 0, 0, 38),
+            Parent = Frame,
+        })
+        New("UIListLayout", {
+            FillDirection = Enum.FillDirection.Horizontal,
+            Padding = UDim.new(0, 8),
+            VerticalAlignment = Enum.VerticalAlignment.Center,
+            Parent = Header,
+        })
+        New("UIPadding", {
+            PaddingLeft = UDim.new(0, 12),
+            PaddingRight = UDim.new(0, 10),
+            Parent = Header,
+        })
+
+        local TitleIcon = New("ImageLabel", {
+            ImageColor3 = "AccentColor",
+            LayoutOrder = 1,
+            Size = UDim2.fromOffset(16, 16),
+            Visible = false,
+            Parent = Header,
+        })
+        local TerminalIcon = Library:GetIcon("terminal")
+        if TerminalIcon then
+            TitleIcon.Visible = true
+            Library:ApplyLucideIcon(TitleIcon, TerminalIcon)
+        end
+
+        New("TextLabel", {
+            AutomaticSize = Enum.AutomaticSize.X,
+            BackgroundTransparency = 1,
+            LayoutOrder = 2,
+            Size = UDim2.new(0, 0, 1, 0),
+            Text = "Console",
+            TextSize = 15,
+            Parent = Header,
+        })
+        CountLabel = New("TextLabel", {
+            AutomaticSize = Enum.AutomaticSize.X,
+            BackgroundTransparency = 1,
+            LayoutOrder = 3,
+            Size = UDim2.new(0, 0, 1, 0),
+            Text = "0",
+            TextSize = 13,
+            TextTransparency = 0.55,
+            Parent = Header,
+        })
+
+        SearchBox = New("TextBox", {
+            BackgroundColor3 = "MainColor",
+            ClearTextOnFocus = false,
+            LayoutOrder = 4,
+            PlaceholderText = "Search output...",
+            Size = UDim2.new(0, 0, 0, 24),
+            Text = "",
+            TextSize = 14,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            Parent = Header,
+        })
+        New("UIFlexItem", {
+            FlexMode = Enum.UIFlexMode.Grow,
+            Parent = SearchBox,
+        })
+        New("UIPadding", {
+            PaddingLeft = UDim.new(0, 8),
+            PaddingRight = UDim.new(0, 8),
+            Parent = SearchBox,
+        })
+        table.insert(
+            Library.Corners,
+            New("UICorner", {
+                CornerRadius = UDim.new(0, Library.CornerRadius / 2),
+                Parent = SearchBox,
+            })
+        )
+        local SearchStroke = New("UIStroke", {
+            Color = "OutlineColor",
+            Parent = SearchBox,
+        })
+        SearchBox.Focused:Connect(function()
+            Library.Registry[SearchStroke].Color = "AccentColor"
+            TweenService:Create(SearchStroke, Library.TweenInfo, { Color = Library.Scheme.AccentColor }):Play()
+        end)
+        SearchBox.FocusLost:Connect(function()
+            Library.Registry[SearchStroke].Color = "OutlineColor"
+            TweenService:Create(SearchStroke, Library.TweenInfo, { Color = Library.Scheme.OutlineColor }):Play()
+        end)
+
+        local SearchToken = 0
+        SearchBox:GetPropertyChangedSignal("Text"):Connect(function()
+            SearchToken += 1
+            local Token = SearchToken
+
+            task.delay(0.12, function()
+                if Token ~= SearchToken then
+                    return
+                end
+
+                Query = NormalizeSearch(SearchBox.Text:lower())
+                Console:Refresh()
+            end)
+        end)
+
+        PauseButton = CreateIconButton(Header, 5, "pause", "||", function()
+            Console:SetPaused(not Console.Paused)
+        end)
+        CreateIconButton(Header, 6, "settings-2", "S", function()
+            BuildSettings()
+            SettingsOverlay.Visible = not SettingsOverlay.Visible
+        end)
+        CreateIconButton(Header, 7, "trash-2", "C", function()
+            Console:Clear()
+        end)
+        CreateIconButton(Header, 8, "x", "X", function()
+            Console:SetVisible(false)
+        end)
+
+        Library:MakeLine(Frame, {
+            Position = UDim2.fromOffset(0, 38),
+            Size = UDim2.new(1, 0, 0, 1),
+        })
+
+        --// Output \\--
+        Output = New("ScrollingFrame", {
+            AutomaticCanvasSize = Enum.AutomaticSize.Y,
+            BackgroundTransparency = 1,
+            CanvasSize = UDim2.fromOffset(0, 0),
+            Position = UDim2.fromOffset(0, 39),
+            ScrollBarImageColor3 = "OutlineColor",
+            ScrollBarThickness = 3,
+            ScrollingDirection = Enum.ScrollingDirection.Y,
+            Size = UDim2.new(1, 0, 1, -61),
+            Parent = Frame,
+        })
+        New("UIListLayout", {
+            Padding = UDim.new(0, 1),
+            Parent = Output,
+        })
+        New("UIPadding", {
+            PaddingBottom = UDim.new(0, 6),
+            PaddingLeft = UDim.new(0, 6),
+            PaddingRight = UDim.new(0, 8),
+            PaddingTop = UDim.new(0, 6),
+            Parent = Output,
+        })
+
+        --// Footer \\--
+        Library:MakeLine(Frame, {
+            AnchorPoint = Vector2.new(0, 1),
+            Position = UDim2.new(0, 0, 1, -22),
+            Size = UDim2.new(1, 0, 0, 1),
+        })
+        StatusLabel = New("TextLabel", {
+            AnchorPoint = Vector2.new(0, 1),
+            BackgroundTransparency = 1,
+            Position = UDim2.fromScale(0, 1),
+            Size = UDim2.new(1, -30, 0, 22),
+            Text = "0 lines",
+            TextSize = 13,
+            TextTransparency = 0.5,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            Parent = Frame,
+        })
+        New("UIPadding", {
+            PaddingLeft = UDim.new(0, 12),
+            Parent = StatusLabel,
+        })
+
+        local Grabber = New("ImageButton", {
+            AnchorPoint = Vector2.new(1, 1),
+            BackgroundTransparency = 1,
+            ImageColor3 = "FontColor",
+            ImageTransparency = 0.5,
+            Position = UDim2.new(1, -4, 1, -4),
+            Size = UDim2.fromOffset(14, 14),
+            Parent = Frame,
+        })
+        if ResizeIcon then
+            Library:ApplyLucideIcon(Grabber, ResizeIcon)
+        end
+        Grabber.InputBegan:Connect(function(Input: InputObject)
+            if not IsClickInput(Input) then
+                return
+            end
+
+            local StartMouse = Vector2.new(Mouse.X, Mouse.Y)
+            local StartSize = Frame.Size
+
+            while IsDragInput(Input) and not Console.Destroyed do
+                local Delta = (Vector2.new(Mouse.X, Mouse.Y) - StartMouse) / Library.DPIScale
+                Frame.Size = UDim2.fromOffset(
+                    math.max(360, StartSize.X.Offset + Delta.X),
+                    math.max(200, StartSize.Y.Offset + Delta.Y)
+                )
+
+                RunService.RenderStepped:Wait()
+            end
+        end)
+
+        --// "Jump to latest" button \\--
+        JumpButton = New("TextButton", {
+            AnchorPoint = Vector2.new(1, 1),
+            AutomaticSize = Enum.AutomaticSize.X,
+            BackgroundColor3 = "AccentColor",
+            Position = UDim2.new(1, -16, 1, -30),
+            Size = UDim2.fromOffset(0, 22),
+            Text = "Jump to latest",
+            TextColor3 = "WhiteColor",
+            TextSize = 13,
+            Visible = false,
+            Parent = Frame,
+        })
+        New("UICorner", {
+            CornerRadius = UDim.new(1, 0),
+            Parent = JumpButton,
+        })
+        New("UIPadding", {
+            PaddingLeft = UDim.new(0, 12),
+            PaddingRight = UDim.new(0, 12),
+            Parent = JumpButton,
+        })
+        JumpButton.MouseButton1Click:Connect(function()
+            Stick = true
+            JumpButton.Visible = false
+            ScrollToBottom()
+        end)
+
+        local function UpdateJump()
+            JumpButton.Visible = not IsAtBottom()
+        end
+        Output:GetPropertyChangedSignal("CanvasPosition"):Connect(function()
+            Stick = IsAtBottom()
+            UpdateJump()
+        end)
+        Output:GetPropertyChangedSignal("AbsoluteCanvasSize"):Connect(function()
+            if Stick and Settings.AutoScroll then
+                ScrollToBottom()
+            else
+                UpdateJump()
+            end
+        end)
+        Output:GetPropertyChangedSignal("AbsoluteWindowSize"):Connect(function()
+            if Stick and Settings.AutoScroll then
+                ScrollToBottom()
+            end
+        end)
+
+        --// Settings popup overlay (the card is built the first time it opens) \\--
+        SettingsOverlay = New("TextButton", {
+            AutoButtonColor = false,
+            BackgroundColor3 = "DarkColor",
+            BackgroundTransparency = 0.45,
+            Position = UDim2.fromOffset(0, 39),
+            Size = UDim2.new(1, 0, 1, -39),
+            Text = "",
+            Visible = false,
+            Parent = Frame,
+        })
+        SettingsOverlay.MouseButton1Click:Connect(function()
+            SettingsOverlay.Visible = false
+        end)
+
+        Library:MakeDraggable(Frame, Header, true)
+        table.insert(Library.DraggableElements, Frame)
+
+        Dirty = true
+    end
+
+    function Console:SetVisible(Visible: boolean)
+        Visible = Visible == true
+        if Console.Destroyed then
+            return
+        end
+
+        if Visible then
+            BuildUI()
+        end
+
+        Console.Visible = Visible
+        if Frame then
+            Frame.Visible = Visible
+        end
+
+        if Visible then
+            Stick = true
+            Flush()
+            Console:Refresh()
+            ScrollToBottom()
+        end
+
+        if Library.Toolbar and Library.Toolbar.ConsoleButton then
+            Library.Toolbar.ConsoleButton:SetActive(Visible, true)
+        end
+
+        --// keeps the mouse free while only the console is open \\--
+        local WindowInfo = Library.Window and Library.Window.WindowInfo
+        if not WindowInfo or WindowInfo.UnlockMouseWhileOpen ~= false then
+            ModalElement.Modal = Visible or Library.Toggled == true
+        end
+    end
+
+    function Console:Show()
+        Console:SetVisible(true)
+    end
+    function Console:Hide()
+        Console:SetVisible(false)
+    end
+    function Console:Toggle()
+        Console:SetVisible(not Console.Visible)
+    end
+
+    function Console:Destroy()
+        Console.Destroyed = true
+
+        if CaptureConnection then
+            CaptureConnection:Disconnect()
+            CaptureConnection = nil
+        end
+
+        local Idx = table.find(Library.DraggableElements, Frame)
+        if Idx then
+            table.remove(Library.DraggableElements, Idx)
+        end
+
+        if Frame then
+            Frame:Destroy()
+        end
+        Library.Console = nil
+    end
+
+    Library:GiveSignal(RunService.Heartbeat:Connect(function()
+        if Console.Destroyed or not Console.Visible then
+            return
+        end
+
+        if Dirty and not Console.Paused then
+            Flush()
+        end
+        if StatusDirty then
+            UpdateStatus()
+        end
+    end))
+
+    UpdateCapture()
+    Library.Console = Console
+    return Console
+end
+
+Library:CreateConsole()
+
 function Library:CreateWindow(WindowInfo)
     WindowInfo = Library:Validate(WindowInfo, Templates.Window)
     local ViewportSize: Vector2 = workspace.CurrentCamera.ViewportSize
@@ -19133,7 +20397,7 @@ function Library:CreateWindow(WindowInfo)
         end
 
         if WindowInfo.UnlockMouseWhileOpen then
-            ModalElement.Modal = Library.Toggled
+            ModalElement.Modal = Library.Toggled or (Library.Console ~= nil and Library.Console.Visible == true)
         end
 
         if Library.Toggled and not Library.IsMobile then
@@ -19400,6 +20664,18 @@ function Library:CreateWindow(WindowInfo)
                 Callback = function(Active)
                     local Watermark = Library.Watermark or Library:CreateWatermark({ Title = WindowInfo.Title })
                     Watermark:SetVisible(Active)
+                end,
+            })
+
+            Toolbar.ConsoleButton = Toolbar:AddButton({
+                Icon = "terminal",
+                Tooltip = "Console",
+                Toggle = true,
+                Active = Library.Console ~= nil and Library.Console.Visible,
+                Callback = function(Active)
+                    if Library.Console then
+                        Library.Console:SetVisible(Active)
+                    end
                 end,
             })
 
@@ -20775,6 +22051,14 @@ function Library:SetSettingsTab(Tab, Info)
         })
         Library.ToggleKeybind = Options.Octo_MenuKey
 
+        Box:AddButton({
+            Text = "Open console",
+            Func = function()
+                if Library.Console then
+                    Library.Console:Show()
+                end
+            end,
+        })
         Box:AddToggle("Octo_UI_Toolbar", {
             Text = "Top toolbar",
             Default = Bind("Octo_UI_Toolbar", true, function(Value)
@@ -21082,6 +22366,10 @@ function Library:Unload()
 
     if Library.ActiveLoading then
         Library.ActiveLoading:Destroy()
+    end
+
+    if Library.Console then
+        Library.Console:Destroy()
     end
 
     if ScreenGui then
