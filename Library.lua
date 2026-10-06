@@ -266,6 +266,14 @@ local Library = {
     CopyTextColor = Color3.fromRGB(88, 166, 255),
     CopyTextIcon = "rbxassetid://85387882337161",
     NotifyOnCopy = false,
+
+    --// <Function id="x">text</Function> markup \\--
+    Functions = {},
+    FunctionHandlers = {},
+
+    --// Modals / sections \\--
+    OpenModals = 0,
+    GroupSections = {},
     ForceCheckbox = false,
 
     CantDragForced = false,
@@ -570,6 +578,47 @@ local Templates = {
         Visible = true,
 
         AllowRightClickInput = true
+    },
+    ProfileCard = {
+        Name = "Name",
+        Subname = nil, -- "@handle"
+        AboutMe = nil,
+        AboutTitle = "About me",
+
+        Avatar = nil, -- asset id / url
+        UserId = nil, -- Roblox user id (uses the headshot)
+        AvatarSize = 56,
+        AvatarShape = "Circle", -- "Circle" | "Rounded"
+        Status = nil, -- "online" | "idle" | "dnd" | "offline" | Color3
+
+        Banner = nil, -- banner image
+        BannerHeight = 72,
+        BannerTransparency = 0,
+        Gradient = false, -- true (accent) | { Color3, Color3, ... }
+        GradientRotation = 25,
+
+        Tags = {}, -- { "Developer", { Text = "PRO", Color = Color3 } }
+        Buttons = {}, -- same format as AddCard
+        Callback = nil, -- makes the whole card clickable
+
+        CornerRadius = nil,
+        Visible = true,
+    },
+    Modal = {
+        Title = "Modal",
+        Description = nil,
+        Icon = nil,
+
+        Width = 420,
+        MaxHeight = 520,
+        Padding = 12,
+
+        Closable = true,
+        OutsideClickDismiss = true,
+        AutoShow = true,
+
+        Buttons = {}, -- footer buttons: { { Text = "OK", Variant = "Primary", Callback = function(Modal) end, Dismiss = true } }
+        OnClose = nil,
     },
     Card = {
         Title = "Card",
@@ -1903,7 +1952,7 @@ local function ResetTab(Tab)
     end
 end
 
-function Library:UpdateSearch(SearchText)
+local function UpdateSearchCore(SearchText)
     Library.SearchText = SearchText
 
     local TabsToSearch = {}
@@ -1982,6 +2031,18 @@ function Library:UpdateSearch(SearchText)
     end
 
     Library.LastSearchTab = nil
+end
+
+--// Collapsible sections show their content (and hide when nothing matches) while searching \\--
+function Library:RefreshSections()
+    for _, Section in Library.GroupSections do
+        Section:Update()
+    end
+end
+
+function Library:UpdateSearch(SearchText)
+    UpdateSearchCore(SearchText)
+    Library:RefreshSections()
 end
 
 function Library:AddToRegistry(Instance, Properties)
@@ -2194,35 +2255,87 @@ end
 local CopyNBSP = "\u{00A0}"
 local CopyStates = setmetatable({}, { __mode = "k" })
 
---// Converts <c> markup. Returns: converted text, spans ({ Start, End, Copy } in visible character indexes), visible characters \\--
+local function HasCustomMarkup(Text: string): boolean
+    if not Text:find("<", 1, true) then
+        return false
+    end
+
+    local Lower = Text:lower()
+    return Lower:find("<c>", 1, true) ~= nil
+        or Lower:find("<function", 1, true) ~= nil
+        or Lower:find("<badge", 1, true) ~= nil
+        or Lower:find("<kbd", 1, true) ~= nil
+end
+
+local function ParseFunctionId(Raw: string): string?
+    return Raw:match('[Ii][Dd]%s*=%s*"([^"]*)"')
+        or Raw:match("[Ii][Dd]%s*=%s*'([^']*)'")
+        or Raw:match('=%s*"([^"]*)"')
+        or Raw:match("=%s*([%w_%-%.]+)")
+end
+
+--// Converts custom markup: <c>copy</c>, <Function id="x">fire</Function>, <badge>NEW</badge>, <kbd>F</kbd> \\--
+--// Returns: converted text, spans ({ Start, End, Copy, Kind, Id } in visible character indexes), visible characters \\--
 local function ConvertCopyMarkup(Text: string, WithSpacer: boolean)
     local Out, Chars, Spans = {}, {}, {}
-    local Color = Library.CopyTextColor:ToHex()
+    local CopyHex = Library.CopyTextColor:ToHex()
+    local AccentHex = Library.Scheme.AccentColor:ToHex()
     local Current
 
+    local function Pad()
+        table.insert(Out, CopyNBSP)
+        table.insert(Chars, CopyNBSP)
+    end
+
     local function CloseSpan()
-        table.insert(Spans, { Start = Current.Start, End = #Chars, Copy = table.concat(Current.Parts) })
-        table.insert(Out, "</font>")
+        table.insert(Spans, {
+            Start = Current.Start,
+            End = #Chars,
+            Copy = table.concat(Current.Parts),
+            Kind = Current.Kind,
+            Id = Current.Id,
+        })
+        table.insert(Out, Current.Kind == "fn" and "</u></font>" or "</font>")
         Current = nil
 
         if WithSpacer then
             for _ = 1, 3 do
-                table.insert(Out, CopyNBSP)
-                table.insert(Chars, CopyNBSP)
+                Pad()
             end
         end
     end
 
     for _, Token in TokenizeRichText(Text) do
         if Token.Tag then
-            local Name = Token.Raw:lower()
+            local Raw = Token.Raw
+            local Name = Raw:lower()
+
             if Name == "<c>" and not Current then
-                Current = { Start = #Chars + 1, Parts = {} }
-                table.insert(Out, string.format('<font color="#%s">', Color))
-            elseif Name == "</c>" and Current then
+                Current = { Start = #Chars + 1, Parts = {}, Kind = "copy" }
+                table.insert(Out, string.format('<font color="#%s">', CopyHex))
+            elseif Name:match("^<function[%s=>]") and not Current then
+                Current = { Start = #Chars + 1, Parts = {}, Kind = "fn", Id = ParseFunctionId(Raw) }
+                table.insert(Out, string.format('<font color="#%s"><u>', AccentHex))
+            elseif
+                (Name == "</c>" and Current and Current.Kind == "copy")
+                or (Name == "</function>" and Current and Current.Kind == "fn")
+            then
                 CloseSpan()
+            elseif Name:match("^<badge[%s=>]") then
+                local Hex = Raw:match("#?(%x%x%x%x%x%x)") or AccentHex
+                table.insert(Out, string.format('<mark color="#%s" transparency="0.35"><b>', Hex))
+                Pad()
+            elseif Name == "</badge>" then
+                Pad()
+                table.insert(Out, "</b></mark>")
+            elseif Name == "<kbd>" then
+                table.insert(Out, string.format('<mark color="#%s" transparency="0.2">', Library:GetBetterColor(Library.Scheme.MainColor, 8):ToHex()))
+                Pad()
+            elseif Name == "</kbd>" then
+                Pad()
+                table.insert(Out, "</mark>")
             else
-                table.insert(Out, Token.Raw)
+                table.insert(Out, Raw)
             end
         else
             table.insert(Out, Token.Raw)
@@ -2273,6 +2386,66 @@ local function CopyToClipboard(Text: string, Icon: GuiObject?)
     end
 end
 
+--// <Function> markup: Library:RegisterFunction("id", callback) / Library:OnFunctionClick(callback) \\--
+local function FireFunction(Span, Label, Icon)
+    if Icon and Icon.Parent then
+        Icon.ImageColor3 = Color3.fromRGB(80, 220, 120)
+        task.delay(0.6, function()
+            if Icon.Parent then
+                Icon.ImageColor3 = Library.Scheme.AccentColor
+            end
+        end)
+    end
+
+    local Handler = Span.Id and Library.Functions[Span.Id]
+    if Handler then
+        Library:SafeCallback(Handler, Span.Copy, Label, Span.Id)
+    end
+
+    for _, Callback in Library.FunctionHandlers do
+        Library:SafeCallback(Callback, Span.Id, Span.Copy, Label)
+    end
+end
+
+local function ActivateSpan(Span, Label, Icon)
+    if Span.Kind == "fn" then
+        FireFunction(Span, Label, Icon)
+    else
+        CopyToClipboard(Span.Copy, Icon)
+    end
+end
+
+function Library:RegisterFunction(Id: string, Callback: (...any) -> ())
+    assert(typeof(Id) == "string" and typeof(Callback) == "function", "RegisterFunction expects (string, function)")
+    Library.Functions[Id] = Callback
+
+    return function()
+        if Library.Functions[Id] == Callback then
+            Library.Functions[Id] = nil
+        end
+    end
+end
+
+function Library:UnregisterFunction(Id: string)
+    Library.Functions[Id] = nil
+end
+
+--// Runs for every <Function> click: callback(Id, Text, Label) \--
+function Library:OnFunctionClick(Callback: (...any) -> ())
+    table.insert(Library.FunctionHandlers, Callback)
+
+    return function()
+        local Idx = table.find(Library.FunctionHandlers, Callback)
+        if Idx then
+            table.remove(Library.FunctionHandlers, Idx)
+        end
+    end
+end
+
+function Library:FunctionLink(Id: string, Text: any): string
+    return string.format('<Function id="%s">%s</Function>', Id, EscapeRichText(Text))
+end
+
 --// Measures where every <c> span ends and places the icon right after it (supports wrapping, new lines and text alignment) \\--
 local function LayoutCopyLabel(Label)
     local State = CopyStates[Label]
@@ -2314,7 +2487,7 @@ local function LayoutCopyLabel(Label)
 
                     local Span = State.Spans[1]
                     if Span then
-                        CopyToClipboard(Span.Copy)
+                        ActivateSpan(Span, Label)
                     end
                 end)
             end
@@ -2507,8 +2680,8 @@ local function LayoutCopyLabel(Label)
             local Icon = New("ImageButton", {
                 AnchorPoint = Vector2.new(0, 0.5),
                 BackgroundTransparency = 1,
-                Image = Library.CopyTextIcon,
-                ImageColor3 = Library.CopyTextColor,
+                Image = Span.Kind == "fn" and "" or Library.CopyTextIcon,
+                ImageColor3 = Span.Kind == "fn" and Library.Scheme.AccentColor or Library.CopyTextColor,
                 ImageTransparency = 0.15,
                 Position = UDim2.fromOffset(EndX + 3, LineTop(EndLine) + LineHeight / 2),
                 Size = UDim2.fromOffset(IconSize, IconSize),
@@ -2517,8 +2690,17 @@ local function LayoutCopyLabel(Label)
             })
             table.insert(State.Objects, Icon)
 
+            if Span.Kind == "fn" then
+                local ZapIcon = Library:GetCustomIcon("zap")
+                if ZapIcon then
+                    Library:ApplyLucideIcon(Icon, ZapIcon)
+                else
+                    Icon.Visible = false
+                end
+            end
+
             Icon.MouseButton1Click:Connect(function()
-                CopyToClipboard(Span.Copy, Icon)
+                ActivateSpan(Span, Label, Icon)
             end)
             Icon.MouseEnter:Connect(function()
                 Icon.ImageTransparency = 0
@@ -2540,7 +2722,7 @@ local function LayoutCopyLabel(Label)
                 table.insert(State.Objects, Hit)
 
                 Hit.MouseButton1Click:Connect(function()
-                    CopyToClipboard(Span.Copy, Icon)
+                    ActivateSpan(Span, Label, Icon)
                 end)
                 Hit.MouseEnter:Connect(function()
                     Icon.ImageTransparency = 0
@@ -2561,7 +2743,7 @@ local function ProcessCopyLabel(Label)
         return --// our own write
     end
 
-    if not Text:find("<[cC]>") then
+    if not HasCustomMarkup(Text) then
         if State then
             State.Token += 1
             ClearCopyIcons(State)
@@ -2601,7 +2783,7 @@ end
 SetupCopyButton = function(Button)
     local function Process()
         local Text = Button.Text
-        if Text:find("<[cC]>") then
+        if HasCustomMarkup(Text) then
             Button.Text = (ConvertCopyMarkup(Text, false))
         end
     end
@@ -5082,6 +5264,103 @@ end
 
 function Library:OnUnload(Callback)
     table.insert(Library.UnloadSignals, Callback)
+end
+
+--// Small action button used by profile cards and modal footers \\--
+local function BuildActionButton(Parent: GuiObject, ButtonInfo: any, Owner: any, Order: number, Fill: boolean)
+    ButtonInfo = typeof(ButtonInfo) == "table" and ButtonInfo or { Text = tostring(ButtonInfo) }
+
+    local Button = {
+        Text = ButtonInfo.Text or "Button",
+        Func = ButtonInfo.Func or ButtonInfo.Callback,
+        Variant = ButtonInfo.Variant or "Secondary",
+        Disabled = ButtonInfo.Disabled == true,
+        Visible = ButtonInfo.Visible ~= false,
+        Type = "ActionButton",
+    }
+
+    local BackgroundKey, TextKey = "MainColor", "FontColor"
+    if Button.Variant == "Primary" then
+        BackgroundKey, TextKey = "AccentColor", "WhiteColor"
+    elseif Button.Variant == "Destructive" then
+        BackgroundKey, TextKey = "DestructiveColor", "WhiteColor"
+    end
+
+    local Width = Library:GetTextBounds(Button.Text, Library.Scheme.Font, 14) + 26
+    local Base = New("TextButton", {
+        BackgroundColor3 = BackgroundKey,
+        BackgroundTransparency = Button.Variant == "Ghost" and 1 or 0,
+        LayoutOrder = Order,
+        Size = Fill and UDim2.fromScale(1, 1) or UDim2.fromOffset(Width, 26),
+        Text = Button.Text,
+        TextColor3 = TextKey,
+        TextSize = 14,
+        TextTransparency = 0.2,
+        Visible = Button.Visible,
+        Parent = Parent,
+    })
+    table.insert(
+        Library.Corners,
+        New("UICorner", {
+            CornerRadius = UDim.new(0, Library.CornerRadius / 2),
+            Parent = Base,
+        })
+    )
+    New("UIStroke", {
+        Color = "OutlineColor",
+        Parent = Base,
+    })
+
+    local function Paint()
+        Base.Active = not Button.Disabled
+        Base.TextTransparency = Button.Disabled and 0.8 or 0.2
+    end
+    Paint()
+
+    Base.MouseEnter:Connect(function()
+        if not Button.Disabled then
+            TweenService:Create(Base, Library.TweenInfo, { TextTransparency = 0 }):Play()
+        end
+    end)
+    Base.MouseLeave:Connect(function()
+        if not Button.Disabled then
+            TweenService:Create(Base, Library.TweenInfo, { TextTransparency = 0.2 }):Play()
+        end
+    end)
+    Base.MouseButton1Click:Connect(function()
+        if not Button.Disabled then
+            Library:SafeCallback(Button.Func, Owner, Button)
+        end
+    end)
+
+    if typeof(ButtonInfo.Tooltip) == "string" then
+        Button.TooltipTable = Library:AddTooltip(ButtonInfo.Tooltip, nil, Base)
+    end
+
+    function Button:SetText(Text: string)
+        Button.Text = Text
+        Base.Text = Text
+    end
+
+    function Button:SetDisabled(Disabled: boolean)
+        Button.Disabled = Disabled
+        Paint()
+    end
+
+    function Button:SetVisible(Visible: boolean)
+        Button.Visible = Visible
+        Base.Visible = Visible
+    end
+
+    function Button:Destroy()
+        if Button.TooltipTable then
+            Button.TooltipTable:Destroy()
+        end
+        Base:Destroy()
+    end
+
+    Button.Base = Base
+    return Button
 end
 
 --// Grid popup shared by dropdowns and lists (Object needs Values, Value, Display, RunChanged, ...) \\--
@@ -13411,6 +13690,774 @@ do
         return Card
     end
 
+    --// Collapsible section inside a groupbox. Works like a groupbox: Section:AddToggle(...), :AddButton(...) ... \\--
+    -- local Advanced = Groupbox:AddSection({ Name = "Advanced", Collapsed = true })
+    function Funcs:AddSection(...)
+        if self.Destroyed then
+            return nil
+        end
+
+        local Info = select(1, ...)
+        local Name, Collapsed
+        if typeof(Info) == "table" then
+            Name = Info.Name or "Section"
+            Collapsed = Info.Collapsed == true
+        else
+            Name = Info or "Section"
+            Collapsed = select(2, ...) == true
+        end
+
+        local Groupbox = self
+        local Container = Groupbox.Container
+
+        local Holder = New("Frame", {
+            AutomaticSize = Enum.AutomaticSize.Y,
+            BackgroundTransparency = 1,
+            Size = UDim2.new(1, 0, 0, 0),
+            Parent = Container,
+        })
+        New("UIListLayout", {
+            Padding = UDim.new(0, 8),
+            Parent = Holder,
+        })
+
+        local Header = New("TextButton", {
+            BackgroundTransparency = 1,
+            LayoutOrder = 1,
+            Size = UDim2.new(1, 0, 0, 22),
+            Text = "",
+            Parent = Holder,
+        })
+        New("UIListLayout", {
+            FillDirection = Enum.FillDirection.Horizontal,
+            Padding = UDim.new(0, 8),
+            VerticalAlignment = Enum.VerticalAlignment.Center,
+            Parent = Header,
+        })
+
+        local Arrow = New("ImageLabel", {
+            ImageColor3 = "FontColor",
+            ImageTransparency = 0.4,
+            LayoutOrder = 1,
+            Size = UDim2.fromOffset(14, 14),
+            Parent = Header,
+        })
+        if ArrowIcon then
+            Library:ApplyLucideIcon(Arrow, ArrowIcon, 180)
+        end
+
+        local Label = New("TextLabel", {
+            AutomaticSize = Enum.AutomaticSize.X,
+            BackgroundTransparency = 1,
+            LayoutOrder = 2,
+            Size = UDim2.new(0, 0, 1, 0),
+            Text = Name,
+            TextSize = 14,
+            TextTransparency = 0.15,
+            Parent = Header,
+        })
+
+        local Line = New("Frame", {
+            BackgroundColor3 = "OutlineColor",
+            LayoutOrder = 3,
+            Size = UDim2.new(0, 0, 0, 1),
+            Parent = Header,
+        })
+        New("UIFlexItem", {
+            FlexMode = Enum.UIFlexMode.Grow,
+            Parent = Line,
+        })
+        New("UIGradient", {
+            Transparency = NumberSequence.new({
+                NumberSequenceKeypoint.new(0, 0.1),
+                NumberSequenceKeypoint.new(1, 1),
+            }),
+            Parent = Line,
+        })
+
+        local Content = New("Frame", {
+            AutomaticSize = Enum.AutomaticSize.Y,
+            BackgroundTransparency = 1,
+            LayoutOrder = 2,
+            Size = UDim2.new(1, 0, 0, 0),
+            Parent = Holder,
+        })
+        New("UIListLayout", {
+            Padding = UDim.new(0, 10),
+            Parent = Content,
+        })
+        New("UIPadding", {
+            PaddingLeft = UDim.new(0, 8),
+            Parent = Content,
+        })
+
+        local Section = {
+            Type = "Section",
+            Name = Name,
+
+            Connections = {},
+            Destroyed = false,
+            Collapsed = false,
+            Visible = true,
+
+            Holder = Holder,
+            Container = Content,
+
+            Elements = Groupbox.Elements,
+            DependencyBoxes = Groupbox.DependencyBoxes,
+
+            Tab = Groupbox.Tab,
+            IsKeyTab = Groupbox.IsKeyTab,
+            Parent = Groupbox,
+        }
+
+        function Section:Resize()
+            Groupbox:Resize()
+        end
+
+        function Section:Update()
+            if Section.Destroyed then
+                return
+            end
+
+            local Searching = Library.Searching == true
+            Content.Visible = Searching or not Section.Collapsed
+
+            if not Section.Visible then
+                Holder.Visible = false
+                return
+            end
+
+            if Searching then
+                local Any = false
+                for _, Child in Content:GetChildren() do
+                    if Child:IsA("GuiObject") and Child.Visible then
+                        Any = true
+                        break
+                    end
+                end
+
+                Holder.Visible = Any
+            else
+                Holder.Visible = true
+            end
+
+            Groupbox:Resize()
+        end
+
+        function Section:SetCollapsed(Value: boolean)
+            Section.Collapsed = Value == true
+
+            TweenService:Create(Arrow, Library.TweenInfo, { Rotation = Section.Collapsed and 0 or 180 }):Play()
+            Section:Update()
+        end
+
+        function Section:Toggle()
+            Section:SetCollapsed(not Section.Collapsed)
+        end
+
+        function Section:SetName(NewName: string)
+            Section.Name = NewName
+            Label.Text = NewName
+        end
+
+        function Section:SetVisible(Visible: boolean)
+            Section.Visible = Visible
+            Section:Update()
+        end
+
+        function Section:Destroy()
+            if Section.Destroyed then
+                return
+            end
+            Section.Destroyed = true
+
+            local Idx = table.find(Library.GroupSections, Section)
+            if Idx then
+                table.remove(Library.GroupSections, Idx)
+            end
+
+            for _, Element in table.clone(Section.Elements) do
+                if Element.Holder and Element.Holder.Parent == Content and Element.Destroy then
+                    Element:Destroy()
+                end
+            end
+
+            Holder:Destroy()
+            Groupbox:Resize()
+        end
+
+        table.insert(Section.Connections, Header.MouseButton1Click:Connect(function()
+            Section:Toggle()
+        end))
+        table.insert(Section.Connections, Holder.Destroying:Connect(function()
+            local Idx = table.find(Library.GroupSections, Section)
+            if Idx then
+                table.remove(Library.GroupSections, Idx)
+            end
+        end))
+
+        table.insert(Library.GroupSections, Section)
+        setmetatable(Section, BaseGroupbox)
+
+        if Collapsed then
+            Section:SetCollapsed(true)
+            Arrow.Rotation = 0
+        end
+
+        return Section
+    end
+
+    --// Profile card: banner (image / gradient), avatar, name, subname, tags, about me and buttons \\--
+    function Funcs:AddProfileCard(...)
+        if self.Destroyed then
+            return nil
+        end
+
+        local First, Second = select(1, ...), select(2, ...)
+        local Idx, Info
+        if typeof(First) == "table" then
+            Info = First
+        else
+            Idx, Info = First, Second
+        end
+
+        Info = Library:Validate(Info, Templates.ProfileCard)
+
+        local Groupbox = self
+        local Container = Groupbox.Container
+
+        local BannerHeight = math.max(24, tonumber(Info.BannerHeight) or 72)
+        local AvatarSize = math.max(28, tonumber(Info.AvatarSize) or 56)
+        local IsCircle = Info.AvatarShape ~= "Rounded"
+
+        local Card = {
+            Connections = {},
+            Destroyed = false,
+
+            Text = Info.Name,
+            Name = Info.Name,
+            Subname = Info.Subname,
+            AboutMe = Info.AboutMe,
+            Tooltip = Info.AboutMe, --// makes the about text searchable
+            UserId = Info.UserId,
+            AvatarSource = Info.Avatar,
+
+            Buttons = {},
+            Callback = Info.Callback,
+
+            Visible = Info.Visible,
+            Type = "ProfileCard",
+        }
+
+        local Holder = New("Frame", {
+            BackgroundColor3 = "MainColor",
+            ClipsDescendants = true,
+            Size = UDim2.new(1, 0, 0, BannerHeight + 90),
+            Visible = Card.Visible,
+            Parent = Container,
+        })
+        local HolderCorner = New("UICorner", {
+            CornerRadius = UDim.new(0, Info.CornerRadius or Library.CornerRadius),
+            Parent = Holder,
+        })
+        if Info.CornerRadius == nil then
+            table.insert(Library.Corners, HolderCorner)
+        end
+        local HolderStroke = New("UIStroke", {
+            Color = "OutlineColor",
+            Parent = Holder,
+        })
+
+        --// Banner \\--
+        local Banner = New("Frame", {
+            BackgroundColor3 = "OutlineColor",
+            Size = UDim2.new(1, 0, 0, BannerHeight),
+            ZIndex = 1,
+            Parent = Holder,
+        })
+        local BannerImage = New("ImageLabel", {
+            BackgroundTransparency = 1,
+            ImageTransparency = Info.BannerTransparency,
+            ScaleType = Enum.ScaleType.Crop,
+            Size = UDim2.fromScale(1, 1),
+            Visible = false,
+            ZIndex = 1,
+            Parent = Banner,
+        })
+        local BannerGradient = New("Frame", {
+            BackgroundColor3 = Color3.new(1, 1, 1),
+            Size = UDim2.fromScale(1, 1),
+            Visible = false,
+            ZIndex = 2,
+            Parent = Banner,
+        })
+        local GradientObject = New("UIGradient", {
+            Rotation = Info.GradientRotation,
+            Parent = BannerGradient,
+        })
+
+        local ClickButton = New("TextButton", {
+            BackgroundTransparency = 1,
+            Size = UDim2.fromScale(1, 1),
+            Text = "",
+            Visible = Info.Callback ~= nil,
+            ZIndex = 3,
+            Parent = Holder,
+        })
+
+        --// Avatar (with a ring that cuts it out of the banner) \\--
+        local Ring = New("Frame", {
+            AnchorPoint = Vector2.new(0, 0.5),
+            BackgroundColor3 = "MainColor",
+            Position = UDim2.fromOffset(16, BannerHeight),
+            Size = UDim2.fromOffset(AvatarSize + 8, AvatarSize + 8),
+            ZIndex = 5,
+            Parent = Holder,
+        })
+        New("UICorner", {
+            CornerRadius = IsCircle and UDim.new(1, 0) or UDim.new(0, Library.CornerRadius),
+            Parent = Ring,
+        })
+
+        local AvatarImage = New("ImageLabel", {
+            AnchorPoint = Vector2.new(0.5, 0.5),
+            BackgroundColor3 = "AccentColor",
+            Position = UDim2.fromScale(0.5, 0.5),
+            Size = UDim2.new(1, -8, 1, -8),
+            ZIndex = 6,
+            Parent = Ring,
+        })
+        New("UICorner", {
+            CornerRadius = IsCircle and UDim.new(1, 0) or UDim.new(0, math.max(2, Library.CornerRadius - 2)),
+            Parent = AvatarImage,
+        })
+        local Initial = New("TextLabel", {
+            BackgroundTransparency = 1,
+            Size = UDim2.fromScale(1, 1),
+            Text = "",
+            TextColor3 = "WhiteColor",
+            TextSize = math.floor(AvatarSize * 0.45),
+            ZIndex = 7,
+            Parent = AvatarImage,
+        })
+
+        local StatusDot = New("Frame", {
+            AnchorPoint = Vector2.new(1, 1),
+            BackgroundColor3 = Color3.fromRGB(80, 220, 120),
+            Position = UDim2.new(1, IsCircle and -2 or 2, 1, IsCircle and -2 or 2),
+            Size = UDim2.fromOffset(14, 14),
+            Visible = false,
+            ZIndex = 8,
+            Parent = Ring,
+        })
+        New("UICorner", {
+            CornerRadius = UDim.new(1, 0),
+            Parent = StatusDot,
+        })
+        New("UIStroke", {
+            Color = "MainColor",
+            Thickness = 3,
+            Parent = StatusDot,
+        })
+
+        --// Content \\--
+        local Content = New("Frame", {
+            AutomaticSize = Enum.AutomaticSize.Y,
+            BackgroundTransparency = 1,
+            Position = UDim2.fromOffset(0, BannerHeight),
+            Size = UDim2.new(1, 0, 0, 0),
+            ZIndex = 4,
+            Parent = Holder,
+        })
+        New("UIListLayout", {
+            Padding = UDim.new(0, 4),
+            Parent = Content,
+        })
+        New("UIPadding", {
+            PaddingBottom = UDim.new(0, 14),
+            PaddingLeft = UDim.new(0, 16),
+            PaddingRight = UDim.new(0, 16),
+            PaddingTop = UDim.new(0, math.floor(AvatarSize / 2) + 10),
+            Parent = Content,
+        })
+
+        local NameRow = New("Frame", {
+            AutomaticSize = Enum.AutomaticSize.Y,
+            BackgroundTransparency = 1,
+            LayoutOrder = 1,
+            Size = UDim2.new(1, 0, 0, 0),
+            ZIndex = 4,
+            Parent = Content,
+        })
+        New("UIListLayout", {
+            FillDirection = Enum.FillDirection.Horizontal,
+            Padding = UDim.new(0, 6),
+            VerticalAlignment = Enum.VerticalAlignment.Center,
+            Wraps = true,
+            Parent = NameRow,
+        })
+
+        local NameLabel = New("TextLabel", {
+            AutomaticSize = Enum.AutomaticSize.XY,
+            BackgroundTransparency = 1,
+            LayoutOrder = 1,
+            Size = UDim2.fromOffset(0, 0),
+            Text = Info.Name,
+            TextSize = 18,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            ZIndex = 4,
+            Parent = NameRow,
+        })
+
+        local SubnameLabel = New("TextLabel", {
+            AutomaticSize = Enum.AutomaticSize.Y,
+            BackgroundTransparency = 1,
+            LayoutOrder = 2,
+            Size = UDim2.new(1, 0, 0, 0),
+            Text = Info.Subname or "",
+            TextSize = 13,
+            TextTransparency = 0.5,
+            TextWrapped = true,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            Visible = Info.Subname ~= nil and Info.Subname ~= "",
+            ZIndex = 4,
+            Parent = Content,
+        })
+
+        local AboutHolder = New("Frame", {
+            AutomaticSize = Enum.AutomaticSize.Y,
+            BackgroundTransparency = 1,
+            LayoutOrder = 3,
+            Size = UDim2.new(1, 0, 0, 0),
+            Visible = Info.AboutMe ~= nil and Info.AboutMe ~= "",
+            ZIndex = 4,
+            Parent = Content,
+        })
+        New("UIListLayout", {
+            Padding = UDim.new(0, 3),
+            Parent = AboutHolder,
+        })
+        New("UIPadding", {
+            PaddingTop = UDim.new(0, 8),
+            Parent = AboutHolder,
+        })
+        local AboutTitle = New("TextLabel", {
+            AutomaticSize = Enum.AutomaticSize.Y,
+            BackgroundTransparency = 1,
+            LayoutOrder = 1,
+            Size = UDim2.new(1, 0, 0, 0),
+            Text = string.upper(tostring(Info.AboutTitle or "About me")),
+            TextSize = 11,
+            TextTransparency = 0.55,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            ZIndex = 4,
+            Parent = AboutHolder,
+        })
+        local AboutLabel = New("TextLabel", {
+            AutomaticSize = Enum.AutomaticSize.Y,
+            BackgroundTransparency = 1,
+            LayoutOrder = 2,
+            Size = UDim2.new(1, 0, 0, 0),
+            Text = Info.AboutMe or "",
+            TextSize = 14,
+            TextTransparency = 0.2,
+            TextWrapped = true,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            TextYAlignment = Enum.TextYAlignment.Top,
+            ZIndex = 4,
+            Parent = AboutHolder,
+        })
+
+        local ButtonsRow = New("Frame", {
+            BackgroundTransparency = 1,
+            LayoutOrder = 4,
+            Size = UDim2.new(1, 0, 0, 30),
+            Visible = false,
+            ZIndex = 4,
+            Parent = Content,
+        })
+        New("UIPadding", {
+            PaddingTop = UDim.new(0, 4),
+            Parent = ButtonsRow,
+        })
+        New("UIListLayout", {
+            FillDirection = Enum.FillDirection.Horizontal,
+            HorizontalFlex = Enum.UIFlexAlignment.Fill,
+            Padding = UDim.new(0, 8),
+            Parent = ButtonsRow,
+        })
+
+        local function SyncHeight()
+            if Card.Destroyed then
+                return
+            end
+
+            local Height = math.ceil(BannerHeight + Content.AbsoluteSize.Y / Library.DPIScale)
+            if Holder.Size.Y.Offset ~= Height then
+                Holder.Size = UDim2.new(1, 0, 0, Height)
+                Groupbox:Resize()
+            end
+        end
+        table.insert(Card.Connections, Content:GetPropertyChangedSignal("AbsoluteSize"):Connect(SyncHeight))
+
+        --// Setters \\--
+        local function ApplyAvatar()
+            local Source
+            if Card.UserId then
+                Source = string.format("rbxthumb://type=AvatarHeadShot&id=%d&w=150&h=150", Card.UserId)
+            elseif Card.AvatarSource then
+                Source = Card.AvatarSource
+            end
+
+            local Parsed = Source and Library:GetCustomIcon(Source)
+            if Parsed then
+                Library:ApplyLucideIcon(AvatarImage, Parsed)
+                Initial.Text = ""
+            else
+                AvatarImage.Image = ""
+                Initial.Text = string.upper(string.sub(StripRichText(tostring(Card.Name or "?")), 1, 1))
+            end
+        end
+
+        function Card:SetName(Text: string)
+            Card.Name, Card.Text = Text, Text
+            NameLabel.Text = Text
+            ApplyAvatar()
+        end
+
+        function Card:SetSubname(Text: string?)
+            Card.Subname = Text
+            SubnameLabel.Text = Text or ""
+            SubnameLabel.Visible = Text ~= nil and Text ~= ""
+        end
+
+        function Card:SetAboutMe(Text: string?)
+            Card.AboutMe, Card.Tooltip = Text, Text
+            AboutLabel.Text = Text or ""
+            AboutHolder.Visible = Text ~= nil and Text ~= ""
+        end
+
+        function Card:SetAboutTitle(Text: string)
+            AboutTitle.Text = string.upper(tostring(Text))
+        end
+
+        function Card:SetAvatar(Image: string | number | nil)
+            Card.AvatarSource, Card.UserId = Image, nil
+            ApplyAvatar()
+        end
+
+        function Card:SetUserId(UserId: number?)
+            Card.UserId = UserId
+            ApplyAvatar()
+        end
+
+        function Card:SetBanner(Image: string | number | nil)
+            local Parsed = Image and Library:GetCustomIcon(Image)
+            BannerImage.Visible = Parsed ~= nil
+
+            if Parsed then
+                Library:ApplyLucideIcon(BannerImage, Parsed)
+            else
+                BannerImage.Image = ""
+            end
+
+            if BannerGradient.Visible then
+                BannerGradient.BackgroundTransparency = BannerImage.Visible and 0.4 or 0
+            end
+        end
+
+        --// SetGradient(true) uses the accent color and follows the theme, SetGradient({ Color3, Color3 }, rotation) \\--
+        function Card:SetGradient(Value: any, Rotation: number?)
+            if Rotation then
+                GradientObject.Rotation = Rotation
+            end
+
+            local function Sequence(Colors)
+                local Keypoints = {}
+                for Index, Color in Colors do
+                    table.insert(Keypoints, ColorSequenceKeypoint.new((Index - 1) / (#Colors - 1), Color))
+                end
+
+                return ColorSequence.new(Keypoints)
+            end
+
+            local function AccentColors()
+                local H, S, V = Library.Scheme.AccentColor:ToHSV()
+                return { Library.Scheme.AccentColor, Color3.fromHSV((H + 0.14) % 1, math.clamp(S, 0.4, 1), V) }
+            end
+
+            if Value == true then
+                GradientObject.Color = Sequence(AccentColors())
+                Library.Registry[GradientObject] = {
+                    Color = function()
+                        return Sequence(AccentColors())
+                    end,
+                }
+            elseif typeof(Value) == "table" and #Value >= 2 then
+                GradientObject.Color = Sequence(Value)
+                Library.Registry[GradientObject] = nil
+            else
+                Library.Registry[GradientObject] = nil
+                BannerGradient.Visible = false
+                return
+            end
+
+            BannerGradient.BackgroundTransparency = BannerImage.Visible and 0.4 or 0
+            BannerGradient.Visible = true
+        end
+
+        function Card:SetStatus(Status: any)
+            local Colors = {
+                online = Color3.fromRGB(80, 220, 120),
+                idle = Color3.fromRGB(255, 176, 46),
+                dnd = Color3.fromRGB(255, 90, 90),
+                offline = Color3.fromRGB(120, 125, 140),
+            }
+
+            local Color = typeof(Status) == "Color3" and Status or (typeof(Status) == "string" and Colors[Status:lower()])
+            StatusDot.Visible = Color ~= nil and Color ~= false
+            if Color then
+                StatusDot.BackgroundColor3 = Color
+            end
+        end
+
+        local TagFrames = {}
+        function Card:SetTags(Tags: { any }?)
+            for _, Frame in TagFrames do
+                Frame:Destroy()
+            end
+            table.clear(TagFrames)
+
+            for Index, Tag in Tags or {} do
+                local Text = typeof(Tag) == "table" and Tag.Text or tostring(Tag)
+                local Color = typeof(Tag) == "table" and Tag.Color or nil
+
+                local Frame = New("Frame", {
+                    AutomaticSize = Enum.AutomaticSize.X,
+                    BackgroundColor3 = Color or "AccentColor",
+                    LayoutOrder = 10 + Index,
+                    Size = UDim2.fromOffset(0, 16),
+                    ZIndex = 4,
+                    Parent = NameRow,
+                })
+                New("UICorner", {
+                    CornerRadius = UDim.new(1, 0),
+                    Parent = Frame,
+                })
+
+                local TagLabel = New("TextLabel", {
+                    AutomaticSize = Enum.AutomaticSize.X,
+                    BackgroundTransparency = 1,
+                    Size = UDim2.fromOffset(0, 16),
+                    Text = Text,
+                    TextColor3 = "WhiteColor",
+                    TextSize = 11,
+                    ZIndex = 4,
+                    Parent = Frame,
+                })
+                New("UIPadding", {
+                    PaddingLeft = UDim.new(0, 7),
+                    PaddingRight = UDim.new(0, 7),
+                    Parent = TagLabel,
+                })
+
+                table.insert(TagFrames, Frame)
+            end
+        end
+
+        function Card:AddButton(ButtonInfo)
+            local Button = BuildActionButton(ButtonsRow, ButtonInfo, Card, #Card.Buttons + 1, true)
+            table.insert(Card.Buttons, Button)
+            ButtonsRow.Visible = true
+
+            return Button
+        end
+
+        function Card:ClearButtons()
+            for Index = #Card.Buttons, 1, -1 do
+                Card.Buttons[Index]:Destroy()
+                table.remove(Card.Buttons, Index)
+            end
+
+            ButtonsRow.Visible = false
+        end
+
+        function Card:SetVisible(Visible: boolean)
+            Card.Visible = Visible
+            Holder.Visible = Visible
+            Groupbox:Resize()
+        end
+
+        function Card:OnClick(Func)
+            Card.Callback = Func
+            ClickButton.Visible = Func ~= nil
+        end
+
+        table.insert(Card.Connections, ClickButton.MouseButton1Click:Connect(function()
+            Library:SafeCallback(Card.Callback, Card)
+        end))
+        table.insert(Card.Connections, ClickButton.MouseEnter:Connect(function()
+            Library.Registry[HolderStroke].Color = "AccentColor"
+            TweenService:Create(HolderStroke, Library.TweenInfo, { Color = Library.Scheme.AccentColor }):Play()
+        end))
+        table.insert(Card.Connections, ClickButton.MouseLeave:Connect(function()
+            Library.Registry[HolderStroke].Color = "OutlineColor"
+            TweenService:Create(HolderStroke, Library.TweenInfo, { Color = Library.Scheme.OutlineColor }):Play()
+        end))
+
+        --// Initial state \\--
+        ApplyAvatar()
+        Card:SetBanner(Info.Banner)
+        Card:SetGradient(Info.Gradient, Info.GradientRotation)
+        Card:SetStatus(Info.Status)
+        Card:SetTags(Info.Tags)
+        for _, ButtonInfo in Info.Buttons do
+            Card:AddButton(ButtonInfo)
+        end
+
+        Groupbox:Resize()
+        task.defer(SyncHeight)
+
+        Card.Holder = Holder
+        Card.HighlightLabel = NameLabel
+        table.insert(Groupbox.Elements, Card)
+
+        if Idx ~= nil then
+            Options[Idx] = Card
+        end
+
+        function Card:Destroy()
+            Card.Destroyed = true
+
+            for _, Connection in Card.Connections do
+                Connection:Disconnect()
+            end
+            for _, Button in Card.Buttons do
+                Button:Destroy()
+            end
+
+            local CornerIdx = table.find(Library.Corners, HolderCorner)
+            if CornerIdx then
+                table.remove(Library.Corners, CornerIdx)
+            end
+
+            Holder:Destroy()
+
+            local ElemIdx = table.find(Groupbox.Elements, Card)
+            if ElemIdx then
+                table.remove(Groupbox.Elements, ElemIdx)
+            end
+
+            Groupbox:Resize()
+            if Idx ~= nil then
+                Options[Idx] = nil
+            end
+        end
+
+        return Card
+    end
+
     function Funcs:AddDependencyBox()
         if self.Destroyed then return nil end
 
@@ -14916,6 +15963,18 @@ function Library:CreateWatermark(Info)
     return Watermark
 end
 
+--// Keeps the mouse free while the window, the console or a modal is open \\--
+function Library:UpdateMouseUnlock()
+    local WindowInfo = Library.Window and Library.Window.WindowInfo
+    if WindowInfo and WindowInfo.UnlockMouseWhileOpen == false then
+        return
+    end
+
+    ModalElement.Modal = Library.Toggled == true
+        or (Library.Console ~= nil and Library.Console.Visible == true)
+        or Library.OpenModals > 0
+end
+
 --// Console: built-in output window. Library.Console:Print() / Warn() / Error() / Success() / Debug() / Log(level, ...) \\--
 function Library:CreateConsole(Info)
     if Library.Console then
@@ -16123,11 +17182,7 @@ function Library:CreateConsole(Info)
             Library.Toolbar.ConsoleButton:SetActive(Visible, true)
         end
 
-        --// keeps the mouse free while only the console is open \\--
-        local WindowInfo = Library.Window and Library.Window.WindowInfo
-        if not WindowInfo or WindowInfo.UnlockMouseWhileOpen ~= false then
-            ModalElement.Modal = Visible or Library.Toggled == true
-        end
+        Library:UpdateMouseUnlock()
     end
 
     function Console:Show()
@@ -16178,6 +17233,432 @@ function Library:CreateConsole(Info)
 end
 
 Library:CreateConsole()
+
+--// Modal: a popup that works like a groupbox (Modal:AddProfileCard / :AddButton / :AddToggle / ...) and has footer buttons \\--
+-- local Popup = Library:Modal({ Title = "Profile", Buttons = { { Text = "Close", Variant = "Primary" } } }) -- or Window:Modal(...)
+-- Popup:AddProfileCard({ ... }); Popup:Show() / :Hide()
+function Library:Modal(Info)
+    Info = Library:Validate(typeof(Info) == "table" and Info or {}, Templates.Modal)
+
+    local Padding = math.max(6, tonumber(Info.Padding) or 12)
+
+    local Overlay = New("TextButton", {
+        AutoButtonColor = false,
+        BackgroundColor3 = "DarkColor",
+        BackgroundTransparency = 1,
+        Size = UDim2.fromScale(1, 1),
+        Text = "",
+        Visible = false,
+        ZIndex = 18,
+        Parent = ScreenGui,
+    })
+
+    local Card = New("TextButton", {
+        AnchorPoint = Vector2.new(0.5, 0.5),
+        AutoButtonColor = false,
+        AutomaticSize = Enum.AutomaticSize.Y,
+        BackgroundColor3 = "BackgroundColor",
+        Position = UDim2.fromScale(0.5, 0.5),
+        Size = UDim2.fromOffset(tonumber(Info.Width) or 420, 0),
+        Text = "",
+        Parent = Overlay,
+    })
+    table.insert(
+        Library.Corners,
+        New("UICorner", {
+            CornerRadius = UDim.new(0, Library.CornerRadius),
+            Parent = Card,
+        })
+    )
+    Library:AddOutline(Card)
+    New("UIListLayout", {
+        Parent = Card,
+    })
+
+    local CardScale = New("UIScale", {
+        Parent = Card,
+    })
+    table.insert(Library.Scales, CardScale)
+    CardScale.Scale = Library.DPIScale
+
+    --// Header \\--
+    local Header = New("Frame", {
+        AutomaticSize = Enum.AutomaticSize.Y,
+        BackgroundTransparency = 1,
+        LayoutOrder = 1,
+        Size = UDim2.new(1, 0, 0, 0),
+        Parent = Card,
+    })
+    New("UIListLayout", {
+        Padding = UDim.new(0, 4),
+        Parent = Header,
+    })
+    New("UIPadding", {
+        PaddingBottom = UDim.new(0, Padding),
+        PaddingLeft = UDim.new(0, Padding + 2),
+        PaddingRight = UDim.new(0, Padding + 2),
+        PaddingTop = UDim.new(0, Padding + 2),
+        Parent = Header,
+    })
+
+    local TitleRow = New("Frame", {
+        BackgroundTransparency = 1,
+        LayoutOrder = 1,
+        Size = UDim2.new(1, 0, 0, 22),
+        Parent = Header,
+    })
+    local TitleIcon = New("ImageLabel", {
+        AnchorPoint = Vector2.new(0, 0.5),
+        ImageColor3 = "AccentColor",
+        Position = UDim2.fromScale(0, 0.5),
+        Size = UDim2.fromOffset(18, 18),
+        Visible = false,
+        Parent = TitleRow,
+    })
+    local TitleLabel = New("TextLabel", {
+        BackgroundTransparency = 1,
+        Position = UDim2.fromOffset(0, 0),
+        Size = UDim2.new(1, -26, 1, 0),
+        Text = Info.Title,
+        TextSize = 17,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        Parent = TitleRow,
+    })
+    local CloseButton = New("ImageButton", {
+        AnchorPoint = Vector2.new(1, 0.5),
+        BackgroundTransparency = 1,
+        ImageColor3 = "FontColor",
+        ImageTransparency = 0.45,
+        Position = UDim2.fromScale(1, 0.5),
+        Size = UDim2.fromOffset(16, 16),
+        Visible = Info.Closable,
+        Parent = TitleRow,
+    })
+    local CloseIconData = Library:GetIcon("x")
+    if CloseIconData then
+        Library:ApplyLucideIcon(CloseButton, CloseIconData)
+    end
+
+    local DescriptionLabel = New("TextLabel", {
+        AutomaticSize = Enum.AutomaticSize.Y,
+        BackgroundTransparency = 1,
+        LayoutOrder = 2,
+        Size = UDim2.new(1, 0, 0, 0),
+        Text = Info.Description or "",
+        TextSize = 14,
+        TextTransparency = 0.35,
+        TextWrapped = true,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextYAlignment = Enum.TextYAlignment.Top,
+        Visible = Info.Description ~= nil and Info.Description ~= "",
+        Parent = Header,
+    })
+
+    local HeaderLine = Library:MakeLine(Card, {
+        LayoutOrder = 2,
+        Size = UDim2.new(1, 0, 0, 1),
+    })
+
+    --// Body (scrollable, grows with its content up to MaxHeight) \\--
+    local Body = New("ScrollingFrame", {
+        AutomaticCanvasSize = Enum.AutomaticSize.Y,
+        BackgroundTransparency = 1,
+        CanvasSize = UDim2.fromOffset(0, 0),
+        LayoutOrder = 3,
+        ScrollBarThickness = 0,
+        Size = UDim2.new(1, 0, 0, 40),
+        Parent = Card,
+    })
+    local BodyList = New("UIListLayout", {
+        Padding = UDim.new(0, 10),
+        Parent = Body,
+    })
+    New("UIPadding", {
+        PaddingBottom = UDim.new(0, Padding),
+        PaddingLeft = UDim.new(0, Padding),
+        PaddingRight = UDim.new(0, Padding),
+        PaddingTop = UDim.new(0, Padding),
+        Parent = Body,
+    })
+
+    --// Footer \\--
+    local FooterLine = Library:MakeLine(Card, {
+        LayoutOrder = 4,
+        Size = UDim2.new(1, 0, 0, 1),
+    })
+    FooterLine.Visible = false
+
+    local Footer = New("Frame", {
+        AutomaticSize = Enum.AutomaticSize.Y,
+        BackgroundTransparency = 1,
+        LayoutOrder = 5,
+        Size = UDim2.new(1, 0, 0, 0),
+        Visible = false,
+        Parent = Card,
+    })
+    New("UIListLayout", {
+        FillDirection = Enum.FillDirection.Horizontal,
+        HorizontalAlignment = Enum.HorizontalAlignment.Right,
+        Padding = UDim.new(0, 8),
+        VerticalAlignment = Enum.VerticalAlignment.Center,
+        Parent = Footer,
+    })
+    New("UIPadding", {
+        PaddingBottom = UDim.new(0, Padding),
+        PaddingLeft = UDim.new(0, Padding),
+        PaddingRight = UDim.new(0, Padding),
+        PaddingTop = UDim.new(0, Padding),
+        Parent = Footer,
+    })
+
+    local Modal = {
+        Type = "Modal",
+        Connections = {},
+        Destroyed = false,
+        Visible = false,
+        PreviousDialog = nil,
+
+        OutsideClickDismiss = Info.OutsideClickDismiss,
+        Closable = Info.Closable,
+
+        Container = Body,
+        Elements = {},
+        DependencyBoxes = {},
+        FooterButtons = {},
+
+        Overlay = Overlay,
+        Card = Card,
+    }
+
+    local function SyncBody()
+        if Modal.Destroyed then
+            return
+        end
+
+        local Scale = Library.DPIScale
+        local ContentHeight = BodyList.AbsoluteContentSize.Y / Scale + Padding * 2
+        local HeaderHeight = Header.AbsoluteSize.Y / Scale + 1
+        local FooterHeight = Footer.Visible and (Footer.AbsoluteSize.Y / Scale + 1) or 0
+        local MaxBody = math.max(80, (tonumber(Info.MaxHeight) or 520) - HeaderHeight - FooterHeight)
+
+        Body.Size = UDim2.new(1, 0, 0, math.ceil(math.min(ContentHeight, MaxBody)))
+    end
+
+    function Modal:Resize()
+        SyncBody()
+    end
+    table.insert(Modal.Connections, BodyList:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(SyncBody))
+    table.insert(Modal.Connections, Header:GetPropertyChangedSignal("AbsoluteSize"):Connect(SyncBody))
+    table.insert(Modal.Connections, Footer:GetPropertyChangedSignal("AbsoluteSize"):Connect(SyncBody))
+
+    setmetatable(Modal, BaseGroupbox)
+
+    --// Content API \\--
+    function Modal:SetTitle(Text: string)
+        TitleLabel.Text = Text
+    end
+
+    function Modal:SetDescription(Text: string?)
+        DescriptionLabel.Text = Text or ""
+        DescriptionLabel.Visible = Text ~= nil and Text ~= ""
+    end
+
+    function Modal:SetIcon(Icon: string?)
+        local Parsed = Icon and Library:GetCustomIcon(Icon)
+        TitleIcon.Visible = Parsed ~= nil
+        TitleLabel.Position = UDim2.fromOffset(Parsed and 26 or 0, 0)
+        TitleLabel.Size = UDim2.new(1, Parsed and -52 or -26, 1, 0)
+
+        if Parsed then
+            Library:ApplyLucideIcon(TitleIcon, Parsed)
+        end
+    end
+
+    function Modal:SetWidth(Width: number)
+        Card.Size = UDim2.fromOffset(Width, 0)
+    end
+
+    --// Footer button: { Text, Variant, Callback / Func (Modal, Button), Dismiss = true } \\--
+    function Modal:AddFooterButton(ButtonInfo)
+        ButtonInfo = typeof(ButtonInfo) == "table" and ButtonInfo or { Text = tostring(ButtonInfo) }
+
+        local Callback = ButtonInfo.Func or ButtonInfo.Callback
+        local Dismiss = ButtonInfo.Dismiss ~= false
+        local Wrapped = table.clone(ButtonInfo)
+        Wrapped.Func = function(Owner, Button)
+            if typeof(Callback) == "function" then
+                Library:SafeCallback(Callback, Owner, Button)
+            end
+            if Dismiss then
+                Modal:Hide()
+            end
+        end
+
+        local Button = BuildActionButton(Footer, Wrapped, Modal, #Modal.FooterButtons + 1, false)
+        table.insert(Modal.FooterButtons, Button)
+
+        Footer.Visible = true
+        FooterLine.Visible = true
+        SyncBody()
+
+        return Button
+    end
+
+    function Modal:ClearFooter()
+        for Index = #Modal.FooterButtons, 1, -1 do
+            Modal.FooterButtons[Index]:Destroy()
+            table.remove(Modal.FooterButtons, Index)
+        end
+
+        Footer.Visible = false
+        FooterLine.Visible = false
+        SyncBody()
+    end
+
+    --// Show / hide \\--
+    local Tweens = {}
+    local function Stop()
+        for _, Tween in Tweens do
+            StopTween(Tween, true)
+        end
+        table.clear(Tweens)
+    end
+
+    function Modal:Show()
+        if Modal.Destroyed or Modal.Visible then
+            return
+        end
+
+        Modal.Visible = true
+        Stop()
+
+        Overlay.Visible = true
+        Overlay.BackgroundTransparency = 1
+        CardScale.Scale = Library.DPIScale * 0.95
+        SyncBody()
+
+        table.insert(Tweens, TweenService:Create(Overlay, Library.TweenInfo, { BackgroundTransparency = 0.45 }))
+        table.insert(Tweens, TweenService:Create(CardScale, Library.TweenInfo, { Scale = Library.DPIScale }))
+        for _, Tween in Tweens do
+            Tween:Play()
+        end
+
+        if not table.find(Library.DraggableElements, Card) then
+            table.insert(Library.DraggableElements, Card) --// keeps dropdown menus inside the modal open
+        end
+
+        Library.OpenModals += 1
+        Modal.PreviousDialog = Library.ActiveDialog
+        Library.ActiveDialog = Modal
+        Library:UpdateMouseUnlock()
+    end
+
+    function Modal:Hide()
+        if Modal.Destroyed or not Modal.Visible then
+            return
+        end
+
+        Modal.Visible = false
+        Stop()
+
+        table.insert(Tweens, TweenService:Create(Overlay, Library.TweenInfo, { BackgroundTransparency = 1 }))
+        table.insert(Tweens, TweenService:Create(CardScale, Library.TweenInfo, { Scale = Library.DPIScale * 0.95 }))
+        for _, Tween in Tweens do
+            Tween:Play()
+        end
+
+        task.delay(Library.TweenInfo.Time, function()
+            if not Modal.Visible and not Modal.Destroyed then
+                Overlay.Visible = false
+            end
+        end)
+
+        local Idx = table.find(Library.DraggableElements, Card)
+        if Idx then
+            table.remove(Library.DraggableElements, Idx)
+        end
+
+        Library.OpenModals = math.max(0, Library.OpenModals - 1)
+        if Library.ActiveDialog == Modal then
+            Library.ActiveDialog = Modal.PreviousDialog
+        end
+        Modal.PreviousDialog = nil
+        Library:UpdateMouseUnlock()
+
+        if typeof(Info.OnClose) == "function" then
+            Library:SafeCallback(Info.OnClose, Modal)
+        end
+    end
+
+    Modal.Dismiss = Modal.Hide --// the window's Escape handling calls :Dismiss()
+    Modal.Close = Modal.Hide
+
+    function Modal:Toggle()
+        if Modal.Visible then
+            Modal:Hide()
+        else
+            Modal:Show()
+        end
+    end
+
+    function Modal:Destroy()
+        if Modal.Destroyed then
+            return
+        end
+
+        if Modal.Visible then
+            Modal:Hide()
+        end
+        Modal.Destroyed = true
+
+        for _, Connection in Modal.Connections do
+            Connection:Disconnect()
+        end
+        for _, Element in table.clone(Modal.Elements) do
+            if Element.Destroy then
+                Element:Destroy()
+            end
+        end
+
+        local ScaleIdx = table.find(Library.Scales, CardScale)
+        if ScaleIdx then
+            table.remove(Library.Scales, ScaleIdx)
+        end
+
+        Overlay:Destroy()
+    end
+
+    table.insert(Modal.Connections, Overlay.MouseButton1Click:Connect(function()
+        if Modal.OutsideClickDismiss and Modal.Closable then
+            Modal:Hide()
+        end
+    end))
+    table.insert(Modal.Connections, CloseButton.MouseButton1Click:Connect(function()
+        Modal:Hide()
+    end))
+    table.insert(Modal.Connections, UserInputService.InputBegan:Connect(function(Input: InputObject)
+        if
+            Input.KeyCode == Enum.KeyCode.Escape
+            and Modal.Visible
+            and Modal.Closable
+            and Library.ActiveDialog == Modal
+            and not UserInputService:GetFocusedTextBox()
+        then
+            Modal:Hide()
+        end
+    end))
+
+    Modal:SetIcon(Info.Icon)
+    for _, ButtonInfo in Info.Buttons do
+        Modal:AddFooterButton(ButtonInfo)
+    end
+
+    if Info.AutoShow then
+        Modal:Show()
+    end
+
+    return Modal
+end
 
 function Library:CreateWindow(WindowInfo)
     WindowInfo = Library:Validate(WindowInfo, Templates.Window)
@@ -20397,7 +21878,7 @@ function Library:CreateWindow(WindowInfo)
         end
 
         if WindowInfo.UnlockMouseWhileOpen then
-            ModalElement.Modal = Library.Toggled or (Library.Console ~= nil and Library.Console.Visible == true)
+            Library:UpdateMouseUnlock()
         end
 
         if Library.Toggled and not Library.IsMobile then
@@ -20612,6 +22093,10 @@ function Library:CreateWindow(WindowInfo)
 
     function Window:AddToolbarButton(ButtonInfo)
         return Library:CreateToolbar({}):AddButton(ButtonInfo)
+    end
+
+    function Window:Modal(ModalInfo)
+        return Library:Modal(ModalInfo)
     end
 
     function Window:AddWatermark(WatermarkInfo)
@@ -22404,6 +23889,9 @@ function Library:Unload()
     table.clear(TransparencyCache)
     table.clear(NotifyGroups)
     table.clear(Library.SidebarSections)
+    table.clear(Library.GroupSections)
+    table.clear(Library.Functions)
+    table.clear(Library.FunctionHandlers)
     table.clear(ActiveTabTweens)
 
     Library.Toggle = function(...) end
