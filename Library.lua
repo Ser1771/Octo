@@ -273,6 +273,7 @@ local Library = {
 
     --// Modals / sections \\--
     OpenModals = 0,
+    NotificationCenter = nil,
     GroupSections = {},
     ForceCheckbox = false,
 
@@ -668,6 +669,34 @@ local Templates = {
         Draggable = true,
         Visible = true,
         Interval = 0.25,
+    },
+    Table = {
+        Columns = {}, -- { { Key = "name", Title = "Name", Weight = 1, Width = nil, Align = "Left", Sortable = true, Format = function(Value, Row) end, Sort = function(RowA, RowB) end } }
+        Rows = {}, -- { { name = "Octo", level = 5 }, ... } (tables, one key per column)
+
+        Height = 8, -- visible rows
+        RowHeight = 24,
+
+        Searchable = false,
+        Sortable = true,
+        Selectable = true,
+        Multi = false,
+        AllowNull = true,
+        Striped = true,
+        ShowHeader = true,
+        ShowFooter = true,
+
+        Default = nil, -- row / index / { rows }
+        SortKey = nil,
+        SortDescending = false,
+
+        Callback = function() end, -- (selected row | { rows })
+        Changed = function() end,
+        OnRowClick = nil, -- (Row, Index, Table)
+        OnRowDoubleClick = nil,
+
+        Disabled = false,
+        Visible = true,
     },
     List = {
         Values = {},
@@ -2077,7 +2106,7 @@ function Library:SetDPIScale(DPIScale: number)
         if Option.Type == "Dropdown" then
             Option:RecalculateListSize()
             Option:RefreshPool()
-        elseif Option.Type == "List" then
+        elseif Option.Type == "List" or Option.Type == "Table" then
             Option:RefreshPool()
         end
     end
@@ -10459,6 +10488,887 @@ do
         return Slider
     end
 
+    --// Table: sortable columns, search, row selection, virtualised rows \\--
+    -- Group:AddTable("Players", { Text = "Players", Columns = { { Key = "name", Title = "Name" }, { Key = "level", Title = "Level", Width = 70, Align = "Right" } },
+    --     Rows = { { name = "Octo", level = 5 } }, Searchable = true, Callback = function(Row) end })
+    function Funcs:AddTable(Idx, Info)
+        if self.Destroyed then
+            return nil
+        end
+
+        Info = Library:Validate(Info, Templates.Table)
+
+        local Groupbox = self
+        local Container = Groupbox.Container
+
+        local DataTable = {
+            Connections = {},
+            Destroyed = false,
+
+            Text = typeof(Info.Text) == "string" and Info.Text or nil,
+
+            Columns = Info.Columns,
+            Rows = Info.Rows,
+
+            Multi = Info.Multi,
+            Value = Info.Multi and {} or nil, --// selected row (or { [row] = true } when Multi), use :GetSelected()
+
+            SortKey = Info.SortKey,
+            SortDescending = Info.SortDescending == true,
+            Filter = nil,
+
+            Tooltip = Info.Tooltip,
+            DisabledTooltip = Info.DisabledTooltip,
+            TooltipTable = nil,
+
+            Callback = Info.Callback,
+            Changed = Info.Changed,
+
+            Disabled = Info.Disabled,
+            Visible = Info.Visible,
+
+            Type = "Table",
+        }
+
+        local RowHeight = math.max(16, tonumber(Info.RowHeight) or 24)
+        local VisibleRows = math.max(1, math.floor(tonumber(Info.Height) or 8))
+        local HeaderHeight = Info.ShowHeader ~= false and 26 or 0
+        local PoolSize = VisibleRows + 2
+
+        local View = {}
+        local Pool = {}
+        local ColumnLayout = {}
+        local HeaderCells = {}
+        local Query = ""
+        local LastClickTime, LastClickRow = 0, nil
+
+        local Holder = New("Frame", {
+            AutomaticSize = Enum.AutomaticSize.Y,
+            BackgroundTransparency = 1,
+            Size = UDim2.new(1, 0, 0, 0),
+            Visible = DataTable.Visible,
+            Parent = Container,
+        })
+        New("UIListLayout", {
+            Padding = UDim.new(0, 6),
+            Parent = Holder,
+        })
+
+        local Label = New("TextLabel", {
+            BackgroundTransparency = 1,
+            LayoutOrder = 1,
+            Size = UDim2.new(1, 0, 0, 16),
+            Text = DataTable.Text or "",
+            TextSize = 14,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            Visible = DataTable.Text ~= nil,
+            Parent = Holder,
+        })
+
+        local SearchBox
+        if Info.Searchable then
+            SearchBox = New("TextBox", {
+                BackgroundColor3 = "MainColor",
+                ClearTextOnFocus = false,
+                LayoutOrder = 2,
+                PlaceholderText = "Search...",
+                Size = UDim2.new(1, 0, 0, 22),
+                Text = "",
+                TextSize = 14,
+                TextXAlignment = Enum.TextXAlignment.Left,
+                Parent = Holder,
+            })
+            New("UIPadding", {
+                PaddingLeft = UDim.new(0, 8),
+                PaddingRight = UDim.new(0, 8),
+                Parent = SearchBox,
+            })
+            table.insert(
+                Library.Corners,
+                New("UICorner", {
+                    CornerRadius = UDim.new(0, Library.CornerRadius / 2),
+                    Parent = SearchBox,
+                })
+            )
+            local SearchStroke = New("UIStroke", {
+                Color = "OutlineColor",
+                Parent = SearchBox,
+            })
+            table.insert(DataTable.Connections, SearchBox.Focused:Connect(function()
+                Library.Registry[SearchStroke].Color = "AccentColor"
+                TweenService:Create(SearchStroke, Library.TweenInfo, { Color = Library.Scheme.AccentColor }):Play()
+            end))
+            table.insert(DataTable.Connections, SearchBox.FocusLost:Connect(function()
+                Library.Registry[SearchStroke].Color = "OutlineColor"
+                TweenService:Create(SearchStroke, Library.TweenInfo, { Color = Library.Scheme.OutlineColor }):Play()
+            end))
+        end
+
+        local Box = New("Frame", {
+            BackgroundColor3 = "MainColor",
+            ClipsDescendants = true,
+            LayoutOrder = 3,
+            Size = UDim2.new(1, 0, 0, HeaderHeight + VisibleRows * RowHeight + (HeaderHeight > 0 and 1 or 0)),
+            Parent = Holder,
+        })
+        table.insert(
+            Library.Corners,
+            New("UICorner", {
+                CornerRadius = UDim.new(0, Library.CornerRadius / 2),
+                Parent = Box,
+            })
+        )
+        New("UIStroke", {
+            Color = "OutlineColor",
+            Parent = Box,
+        })
+
+        local HeaderFrame = New("Frame", {
+            BackgroundColor3 = "BackgroundColor",
+            BackgroundTransparency = 0.35,
+            Size = UDim2.new(1, 0, 0, HeaderHeight),
+            Visible = HeaderHeight > 0,
+            Parent = Box,
+        })
+        if HeaderHeight > 0 then
+            Library:MakeLine(Box, {
+                Position = UDim2.fromOffset(0, HeaderHeight),
+                Size = UDim2.new(1, 0, 0, 1),
+            })
+        end
+
+        local Items = New("ScrollingFrame", {
+            BackgroundTransparency = 1,
+            CanvasSize = UDim2.fromOffset(0, 0),
+            Position = UDim2.fromOffset(0, HeaderHeight + (HeaderHeight > 0 and 1 or 0)),
+            ScrollBarThickness = 0,
+            ScrollingDirection = Enum.ScrollingDirection.Y,
+            Size = UDim2.new(1, 0, 1, -(HeaderHeight + (HeaderHeight > 0 and 1 or 0))),
+            Parent = Box,
+        })
+
+        local Footer = New("TextLabel", {
+            BackgroundTransparency = 1,
+            LayoutOrder = 4,
+            Size = UDim2.new(1, 0, 0, 14),
+            Text = "",
+            TextSize = 12,
+            TextTransparency = 0.55,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            Visible = Info.ShowFooter ~= false,
+            Parent = Holder,
+        })
+
+        --// Helpers \\--
+        local function GetAlignment(Column): Enum.TextXAlignment
+            local Align = tostring(Column.Align or "Left"):lower()
+            if Align == "center" then
+                return Enum.TextXAlignment.Center
+            elseif Align == "right" then
+                return Enum.TextXAlignment.Right
+            end
+
+            return Enum.TextXAlignment.Left
+        end
+
+        local function CellText(Column, Row): string
+            local Value = Row[Column.Key]
+            if typeof(Column.Format) == "function" then
+                local Ok, Result = pcall(Column.Format, Value, Row)
+                if Ok then
+                    Value = Result
+                end
+            end
+
+            if typeof(Value) == "string" then
+                return Value --// strings keep rich text / <c> / <Function> markup
+            elseif Value == nil then
+                return ""
+            end
+
+            return EscapeRichText(tostring(Value))
+        end
+
+        local function FindColumn(Key: any)
+            for _, Column in DataTable.Columns do
+                if Column.Key == Key then
+                    return Column
+                end
+            end
+
+            return nil
+        end
+
+        local function IsSelected(Row): boolean
+            if DataTable.Multi then
+                return DataTable.Value[Row] == true
+            end
+
+            return DataTable.Value == Row
+        end
+
+        local function SelectedCount(): number
+            if DataTable.Multi then
+                local Count = 0
+                for _ in DataTable.Value do
+                    Count += 1
+                end
+
+                return Count
+            end
+
+            return DataTable.Value ~= nil and 1 or 0
+        end
+
+        local function UpdateFooter()
+            local Text = string.format("%d row%s", #DataTable.Rows, #DataTable.Rows == 1 and "" or "s")
+            if #View ~= #DataTable.Rows then
+                Text ..= string.format("  ·  %d shown", #View)
+            end
+            if SelectedCount() > 0 then
+                Text ..= string.format("  ·  %d selected", SelectedCount())
+            end
+
+            Footer.Text = Text
+        end
+
+        --// Layout (flexible columns share the width that fixed pixel columns leave over) \\--
+        local function ComputeLayout()
+            local Total = Box.AbsoluteSize.X / Library.DPIScale
+            local Fixed, Weights = 0, 0
+
+            for _, Column in DataTable.Columns do
+                if tonumber(Column.Width) then
+                    Fixed += Column.Width
+                else
+                    Weights += tonumber(Column.Weight) or 1
+                end
+            end
+
+            local Remaining = math.max(0, Total - Fixed)
+            local X = 0
+            for Index, Column in DataTable.Columns do
+                local Width = tonumber(Column.Width)
+                    or (Remaining * ((tonumber(Column.Weight) or 1) / math.max(Weights, 0.0001)))
+
+                ColumnLayout[Index] = { X = X, W = Width }
+                X += Width
+            end
+        end
+
+        local function ApplyLayout()
+            ComputeLayout()
+
+            for Index, Cell in HeaderCells do
+                local Layout = ColumnLayout[Index]
+                if Layout then
+                    Cell.Button.Position = UDim2.fromOffset(Layout.X, 0)
+                    Cell.Button.Size = UDim2.fromOffset(Layout.W, HeaderHeight)
+                end
+            end
+
+            for _, PoolRow in Pool do
+                for Index, Cell in PoolRow.Cells do
+                    local Layout = ColumnLayout[Index]
+                    if Layout then
+                        Cell.Position = UDim2.fromOffset(Layout.X + 8, 0)
+                        Cell.Size = UDim2.fromOffset(math.max(0, Layout.W - 16), RowHeight)
+                    end
+                end
+            end
+        end
+
+        local function UpdateHeaderSort()
+            for Index, Cell in HeaderCells do
+                local Sorted = DataTable.SortKey ~= nil and DataTable.Columns[Index].Key == DataTable.SortKey
+                Cell.Arrow.Visible = Sorted and ArrowIcon ~= nil
+                Cell.Button.TextTransparency = Sorted and 0 or 0.35
+
+                if Sorted and ArrowIcon then
+                    Library:ApplyLucideIcon(Cell.Arrow, ArrowIcon, DataTable.SortDescending and 180 or 0)
+                end
+            end
+        end
+
+        --// Header \\--
+        local function BuildHeader()
+            for _, Cell in HeaderCells do
+                Cell.Button:Destroy()
+            end
+            table.clear(HeaderCells)
+
+            for Index, Column in DataTable.Columns do
+                local Button = New("TextButton", {
+                    BackgroundTransparency = 1,
+                    Text = tostring(Column.Title or Column.Key or ""),
+                    TextSize = 13,
+                    TextTransparency = 0.35,
+                    TextTruncate = Enum.TextTruncate.AtEnd,
+                    TextXAlignment = GetAlignment(Column),
+                    Parent = HeaderFrame,
+                })
+                New("UIPadding", {
+                    PaddingLeft = UDim.new(0, 8),
+                    PaddingRight = UDim.new(0, 18),
+                    Parent = Button,
+                })
+
+                local Arrow = New("ImageLabel", {
+                    AnchorPoint = Vector2.new(1, 0.5),
+                    ImageColor3 = "AccentColor",
+                    Position = UDim2.new(1, -4, 0.5, 0),
+                    Size = UDim2.fromOffset(10, 10),
+                    Visible = false,
+                    Parent = Button,
+                })
+
+                Button.MouseEnter:Connect(function()
+                    if DataTable.SortKey ~= Column.Key then
+                        TweenService:Create(Button, Library.TweenInfo, { TextTransparency = 0.1 }):Play()
+                    end
+                end)
+                Button.MouseLeave:Connect(function()
+                    if DataTable.SortKey ~= Column.Key then
+                        TweenService:Create(Button, Library.TweenInfo, { TextTransparency = 0.35 }):Play()
+                    end
+                end)
+                Button.MouseButton1Click:Connect(function()
+                    if DataTable.Disabled or Info.Sortable == false or Column.Sortable == false then
+                        return
+                    end
+
+                    --// ascending -> descending -> unsorted \\--
+                    if DataTable.SortKey == Column.Key then
+                        if not DataTable.SortDescending then
+                            DataTable.SortDescending = true
+                        else
+                            DataTable.SortKey, DataTable.SortDescending = nil, false
+                        end
+                    else
+                        DataTable.SortKey, DataTable.SortDescending = Column.Key, false
+                    end
+
+                    DataTable:BuildView()
+                end)
+
+                HeaderCells[Index] = { Button = Button, Arrow = Arrow }
+            end
+        end
+
+        --// Rows \\--
+        local function BuildCells(PoolRow)
+            for _, Cell in PoolRow.Cells do
+                Cell:Destroy()
+            end
+            table.clear(PoolRow.Cells)
+
+            for Index, Column in DataTable.Columns do
+                PoolRow.Cells[Index] = New("TextLabel", {
+                    BackgroundTransparency = 1,
+                    Text = "",
+                    TextSize = 14,
+                    TextTruncate = Enum.TextTruncate.AtEnd,
+                    TextXAlignment = GetAlignment(Column),
+                    Parent = PoolRow.Button,
+                })
+            end
+        end
+
+        local function CreatePoolRow()
+            local PoolRow = { Cells = {} }
+
+            local Button = New("TextButton", {
+                BackgroundColor3 = "FontColor",
+                BackgroundTransparency = 1,
+                Size = UDim2.new(1, 0, 0, RowHeight),
+                Text = "",
+                Visible = false,
+                Parent = Items,
+            })
+            PoolRow.Button = Button
+
+            function PoolRow:Paint()
+                local Row = PoolRow.Data
+                if not Row then
+                    return
+                end
+
+                local Selected = IsSelected(Row)
+                PoolRow.Selected = Selected
+
+                local Key = Selected and "AccentColor" or "FontColor"
+                Button.BackgroundColor3 = Library.Scheme[Key]
+                if Library.Registry[Button] then
+                    Library.Registry[Button].BackgroundColor3 = Key
+                end
+
+                Button.Active = not DataTable.Disabled
+                Button.BackgroundTransparency = Selected and 0.8 or ((Info.Striped ~= false and PoolRow.Index % 2 == 0) and 0.96 or 1)
+                for _, Cell in PoolRow.Cells do
+                    Cell.TextTransparency = DataTable.Disabled and 0.7 or (Selected and 0 or 0.12)
+                end
+            end
+
+            table.insert(DataTable.Connections, Button.MouseEnter:Connect(function()
+                if PoolRow.Data and not PoolRow.Selected and not DataTable.Disabled and Info.Selectable ~= false then
+                    TweenService:Create(Button, Library.TweenInfo, { BackgroundTransparency = 0.9 }):Play()
+                end
+            end))
+            table.insert(DataTable.Connections, Button.MouseLeave:Connect(function()
+                PoolRow:Paint()
+            end))
+
+            table.insert(DataTable.Connections, Button.MouseButton1Click:Connect(function()
+                local Row = PoolRow.Data
+                if not Row or DataTable.Disabled then
+                    return
+                end
+
+                if Info.Selectable ~= false then
+                    if DataTable.Multi then
+                        DataTable.Value[Row] = (not DataTable.Value[Row]) and true or nil
+                    elseif DataTable.Value == Row then
+                        if Info.AllowNull ~= false then
+                            DataTable.Value = nil
+                        end
+                    else
+                        DataTable.Value = Row
+                    end
+
+                    DataTable:RefreshPool()
+                    UpdateFooter()
+                    DataTable:RunChanged()
+                end
+
+                Library:SafeCallback(Info.OnRowClick, Row, PoolRow.Index, DataTable)
+
+                local Now = tick()
+                if LastClickRow == Row and Now - LastClickTime < 0.35 then
+                    Library:SafeCallback(Info.OnRowDoubleClick, Row, PoolRow.Index, DataTable)
+                    LastClickRow = nil
+                else
+                    LastClickRow, LastClickTime = Row, Now
+                end
+            end))
+
+            BuildCells(PoolRow)
+            return PoolRow
+        end
+
+        for _ = 1, PoolSize do
+            table.insert(Pool, CreatePoolRow())
+        end
+
+        function DataTable:RefreshPool()
+            local Total = #View
+            local First = 1
+            if Total > PoolSize then
+                local ScrollY = Items.CanvasPosition.Y / Library.DPIScale
+                First = math.clamp(math.floor(ScrollY / RowHeight) + 1, 1, Total - PoolSize + 1)
+            end
+
+            for Slot, PoolRow in Pool do
+                local DataIndex = First + Slot - 1
+                local Row = View[DataIndex]
+
+                PoolRow.Data, PoolRow.Index = Row, DataIndex
+                if not Row then
+                    PoolRow.Button.Visible = false
+                    continue
+                end
+
+                PoolRow.Button.Visible = true
+                PoolRow.Button.Position = UDim2.fromOffset(0, (DataIndex - 1) * RowHeight)
+
+                for ColumnIndex, Column in DataTable.Columns do
+                    local Cell = PoolRow.Cells[ColumnIndex]
+                    if Cell then
+                        local Text = CellText(Column, Row)
+                        if Cell.Text ~= Text then
+                            Cell.Text = Text
+                        end
+                    end
+                end
+
+                PoolRow:Paint()
+            end
+        end
+
+        --// Data pipeline: rows -> filter / search -> sort -> view \\--
+        local function Passes(Row): boolean
+            if typeof(DataTable.Filter) == "function" then
+                local Ok, Result = pcall(DataTable.Filter, Row)
+                if Ok and not Result then
+                    return false
+                end
+            end
+
+            if Query ~= "" then
+                local Parts = {}
+                for _, Column in DataTable.Columns do
+                    table.insert(Parts, CellText(Column, Row))
+                end
+
+                if not TryFuzzyMatch(table.concat(Parts, " "), Query) then
+                    return false
+                end
+            end
+
+            return true
+        end
+
+        local function SortValue(Column, Row)
+            local Value = Row[Column.Key]
+            if typeof(Value) == "number" then
+                return Value
+            elseif typeof(Value) == "boolean" then
+                return Value and 1 or 0
+            elseif Value == nil then
+                return ""
+            end
+
+            return StripRichText(tostring(Value)):lower()
+        end
+
+        local function Compare(A, B, Column): boolean
+            if typeof(Column.Sort) == "function" then
+                return Column.Sort(A, B) == true
+            end
+
+            local ValueA, ValueB = SortValue(Column, A), SortValue(Column, B)
+            if typeof(ValueA) ~= typeof(ValueB) then
+                ValueA, ValueB = tostring(ValueA), tostring(ValueB)
+            end
+
+            return ValueA < ValueB
+        end
+
+        function DataTable:BuildView()
+            table.clear(View)
+
+            local Order = {}
+            for Index, Row in DataTable.Rows do
+                Order[Row] = Index
+                if Passes(Row) then
+                    table.insert(View, Row)
+                end
+            end
+
+            local Column = DataTable.SortKey ~= nil and FindColumn(DataTable.SortKey)
+            if Column then
+                table.sort(View, function(A, B)
+                    if A == B then
+                        return false
+                    end
+
+                    local Less, Greater = Compare(A, B, Column), Compare(B, A, Column)
+                    if not Less and not Greater then
+                        return Order[A] < Order[B] --// stable
+                    end
+
+                    return DataTable.SortDescending and Greater or Less
+                end)
+            end
+
+            --// drop selected rows that no longer exist \\--
+            if DataTable.Multi then
+                for Row in DataTable.Value do
+                    if not Order[Row] then
+                        DataTable.Value[Row] = nil
+                    end
+                end
+            elseif DataTable.Value ~= nil and not Order[DataTable.Value] then
+                DataTable.Value = nil
+            end
+
+            Items.CanvasSize = UDim2.fromOffset(0, #View * RowHeight)
+            DataTable:RefreshPool()
+            UpdateFooter()
+            UpdateHeaderSort()
+        end
+
+        --// API \\--
+        function DataTable:OnChanged(Func)
+            DataTable.Changed = Func
+        end
+
+        function DataTable:GetSelected()
+            if not DataTable.Multi then
+                return DataTable.Value
+            end
+
+            local List = {}
+            for _, Row in DataTable.Rows do
+                if DataTable.Value[Row] then
+                    table.insert(List, Row)
+                end
+            end
+
+            return List
+        end
+
+        function DataTable:RunChanged()
+            if DataTable.Disabled then
+                return
+            end
+
+            local Selected = DataTable:GetSelected()
+            Library:SafeCallback(DataTable.Callback, Selected)
+            Library:SafeCallback(DataTable.Changed, Selected)
+        end
+
+        local function Resolve(RowOrIndex)
+            if typeof(RowOrIndex) == "number" then
+                return DataTable.Rows[RowOrIndex]
+            end
+
+            return RowOrIndex
+        end
+
+        --// SetSelected(row | index | { rows / indexes }) or nil to clear \\--
+        function DataTable:SetSelected(Selection)
+            if DataTable.Multi then
+                DataTable.Value = {}
+
+                if typeof(Selection) == "table" and Selection[1] ~= nil then
+                    for _, Item in Selection do
+                        local Row = Resolve(Item)
+                        if Row and table.find(DataTable.Rows, Row) then
+                            DataTable.Value[Row] = true
+                        end
+                    end
+                elseif Selection ~= nil then
+                    local Row = Resolve(Selection)
+                    if Row and table.find(DataTable.Rows, Row) then
+                        DataTable.Value[Row] = true
+                    end
+                end
+            else
+                local Row = Resolve(typeof(Selection) == "table" and Selection[1] ~= nil and Selection[1] or Selection)
+                DataTable.Value = (Row and table.find(DataTable.Rows, Row)) and Row or nil
+            end
+
+            DataTable:RefreshPool()
+            UpdateFooter()
+            DataTable:RunChanged()
+        end
+
+        function DataTable:ClearSelection()
+            DataTable:SetSelected(nil)
+        end
+
+        function DataTable:SetRows(Rows)
+            DataTable.Rows = typeof(Rows) == "table" and Rows or {}
+            DataTable:BuildView()
+        end
+
+        function DataTable:AddRow(Row, Index: number?)
+            if typeof(Row) ~= "table" then
+                return nil
+            end
+
+            if Index then
+                table.insert(DataTable.Rows, Index, Row)
+            else
+                table.insert(DataTable.Rows, Row)
+            end
+
+            DataTable:BuildView()
+            return Row
+        end
+
+        function DataTable:AddRows(Rows)
+            for _, Row in Rows do
+                table.insert(DataTable.Rows, Row)
+            end
+
+            DataTable:BuildView()
+        end
+
+        function DataTable:RemoveRow(RowOrIndex)
+            local Row = Resolve(RowOrIndex)
+            local Position = Row and table.find(DataTable.Rows, Row)
+            if not Position then
+                return false
+            end
+
+            table.remove(DataTable.Rows, Position)
+            DataTable:BuildView()
+            return true
+        end
+
+        function DataTable:UpdateRow(RowOrIndex, Changes)
+            local Row = Resolve(RowOrIndex)
+            if not Row or typeof(Changes) ~= "table" then
+                return
+            end
+
+            for Key, Value in Changes do
+                Row[Key] = Value
+            end
+
+            DataTable:BuildView()
+        end
+
+        function DataTable:Clear()
+            table.clear(DataTable.Rows)
+            DataTable:BuildView()
+        end
+
+        function DataTable:GetRows()
+            return DataTable.Rows
+        end
+
+        function DataTable:GetView()
+            return View
+        end
+
+        function DataTable:SetColumns(Columns)
+            DataTable.Columns = typeof(Columns) == "table" and Columns or {}
+            if DataTable.SortKey ~= nil and not FindColumn(DataTable.SortKey) then
+                DataTable.SortKey = nil
+            end
+
+            BuildHeader()
+            for _, PoolRow in Pool do
+                BuildCells(PoolRow)
+            end
+
+            ApplyLayout()
+            DataTable:BuildView()
+        end
+
+        function DataTable:SetSort(Key, Descending: boolean?)
+            DataTable.SortKey = Key
+            DataTable.SortDescending = Descending == true
+            DataTable:BuildView()
+        end
+
+        function DataTable:SetFilter(Func)
+            DataTable.Filter = Func
+            DataTable:BuildView()
+        end
+
+        function DataTable:SetSearch(Text: string)
+            if SearchBox then
+                SearchBox.Text = Text
+            else
+                Query = NormalizeSearch(tostring(Text):lower())
+                DataTable:BuildView()
+            end
+        end
+
+        function DataTable:SetText(Text: string?)
+            DataTable.Text = Text
+            Label.Text = Text or ""
+            Label.Visible = Text ~= nil
+        end
+
+        function DataTable:UpdateColors()
+            if Library.Unloaded then
+                return
+            end
+
+            Label.TextTransparency = DataTable.Disabled and 0.8 or 0
+            for _, PoolRow in Pool do
+                PoolRow:Paint()
+            end
+        end
+
+        function DataTable:SetDisabled(Disabled: boolean)
+            DataTable.Disabled = Disabled
+
+            if DataTable.TooltipTable then
+                DataTable.TooltipTable.Disabled = Disabled
+            end
+
+            DataTable:UpdateColors()
+            Library:UpdateDependencyBoxes()
+        end
+
+        function DataTable:SetVisible(Visible: boolean)
+            DataTable.Visible = Visible
+
+            Holder.Visible = Visible
+            Groupbox:Resize()
+        end
+
+        table.insert(DataTable.Connections, Items:GetPropertyChangedSignal("CanvasPosition"):Connect(function()
+            DataTable:RefreshPool()
+        end))
+        table.insert(DataTable.Connections, Box:GetPropertyChangedSignal("AbsoluteSize"):Connect(ApplyLayout))
+
+        if SearchBox then
+            local Token = 0
+            table.insert(DataTable.Connections, SearchBox:GetPropertyChangedSignal("Text"):Connect(function()
+                Token += 1
+                local Current = Token
+
+                task.delay(0.1, function()
+                    if Current ~= Token or DataTable.Destroyed then
+                        return
+                    end
+
+                    Query = NormalizeSearch(SearchBox.Text:lower())
+                    Items.CanvasPosition = Vector2.zero
+                    DataTable:BuildView()
+                end)
+            end))
+        end
+
+        if typeof(DataTable.Tooltip) == "string" or typeof(DataTable.DisabledTooltip) == "string" then
+            DataTable.TooltipTable = Library:AddTooltip(DataTable.Tooltip, DataTable.DisabledTooltip, Box)
+            DataTable.TooltipTable.Disabled = DataTable.Disabled
+        end
+
+        BuildHeader()
+        ApplyLayout()
+        DataTable:BuildView()
+
+        if Info.Default ~= nil then
+            local Previous = DataTable.Callback
+            DataTable.Callback = nil --// the default selection must not fire the callback
+            local PreviousChanged = DataTable.Changed
+            DataTable.Changed = nil
+            DataTable:SetSelected(Info.Default)
+            DataTable.Callback, DataTable.Changed = Previous, PreviousChanged
+        end
+
+        DataTable:UpdateColors()
+        Groupbox:Resize()
+
+        DataTable.Holder = Holder
+        DataTable.HighlightLabel = DataTable.Text and Label or nil
+        table.insert(Groupbox.Elements, DataTable)
+
+        Options[Idx] = DataTable
+
+        function DataTable:Destroy()
+            DataTable.Destroyed = true
+
+            for _, Connection in DataTable.Connections do
+                Connection:Disconnect()
+            end
+            if DataTable.TooltipTable then
+                DataTable.TooltipTable:Destroy()
+            end
+
+            if Holder then
+                Holder:Destroy()
+            end
+
+            local ElemIdx = table.find(Groupbox.Elements, DataTable)
+            if ElemIdx then
+                table.remove(Groupbox.Elements, ElemIdx)
+            end
+
+            Groupbox:Resize()
+            Options[Idx] = nil
+        end
+
+        return DataTable
+    end
+
     --// List: like a dropdown, but the values are always visible (scrollable) and a button opens the grid popup \\--
     function Funcs:AddList(Idx, Info)
         if self.Destroyed then
@@ -13742,9 +14652,18 @@ do
             Size = UDim2.fromOffset(14, 14),
             Parent = Header,
         })
-        if ArrowIcon then
-            Library:ApplyLucideIcon(Arrow, ArrowIcon, 180)
+
+        --// down arrow while open, right arrow while collapsed (icons are swapped, no rotation involved) \--
+        local function PaintArrow(IsCollapsed: boolean)
+            local DownIcon, RightIcon = Library:GetIcon("chevron-down"), Library:GetIcon("chevron-right")
+            if DownIcon and RightIcon then
+                Arrow.Rotation = 0
+                Library:ApplyLucideIcon(Arrow, IsCollapsed and RightIcon or DownIcon, 0)
+            elseif ArrowIcon then
+                Library:ApplyLucideIcon(Arrow, ArrowIcon, IsCollapsed and 90 or 180)
+            end
         end
+        PaintArrow(false)
 
         local Label = New("TextLabel", {
             AutomaticSize = Enum.AutomaticSize.X,
@@ -13848,7 +14767,7 @@ do
         function Section:SetCollapsed(Value: boolean)
             Section.Collapsed = Value == true
 
-            TweenService:Create(Arrow, Library.TweenInfo, { Rotation = Section.Collapsed and 0 or 180 }):Play()
+            PaintArrow(Section.Collapsed)
             Section:Update()
         end
 
@@ -13902,7 +14821,6 @@ do
 
         if Collapsed then
             Section:SetCollapsed(true)
-            Arrow.Rotation = 0
         end
 
         return Section
@@ -14899,8 +15817,25 @@ function Library:Notify(...)
             Existing:UpdateCount()
             Existing:StartTimer()
 
+            if Existing.HistoryEntry and Library.NotificationCenter then
+                Library.NotificationCenter:Bump(Existing.HistoryEntry)
+            end
+
             return Existing
         end
+    end
+
+    --// History (notification center) + do not disturb \\--
+    local Center = Library.NotificationCenter
+    if Center and not (typeof(Info) == "table" and Info.History == false) then
+        Data.HistoryEntry = Center:Record(Data)
+    end
+    if Center and Center.Muted then
+        return setmetatable({ Destroyed = true }, {
+            __index = function()
+                return function() end
+            end,
+        })
     end
 
     local DeletedInstance = false
@@ -16061,9 +16996,33 @@ function Library:CreateConsole(Info)
         end
     end
 
+    local AutoSave = true
+    local function WriteSettings()
+        if not HasFS then
+            return
+        end
+
+        local Data = {}
+        for Key in Defaults do
+            Data[Key] = Settings[Key]
+        end
+
+        Data.Levels = {}
+        for _, Name in LevelOrder do
+            if Settings.Levels[Name] then
+                table.insert(Data.Levels, Name)
+            end
+        end
+
+        if not isfolder(Folder) then
+            pcall(makefolder, Folder)
+        end
+        pcall(writefile, SettingsPath, HttpService:JSONEncode(Data))
+    end
+
     local SaveToken = 0
     local function SaveSettings()
-        if not HasFS then
+        if not HasFS or not AutoSave then
             return
         end
 
@@ -16071,26 +17030,9 @@ function Library:CreateConsole(Info)
         local Token = SaveToken
 
         task.delay(0.6, function()
-            if Token ~= SaveToken then
-                return
+            if Token == SaveToken then
+                WriteSettings()
             end
-
-            local Data = {}
-            for Key in Defaults do
-                Data[Key] = Settings[Key]
-            end
-
-            Data.Levels = {}
-            for _, Name in LevelOrder do
-                if Settings.Levels[Name] then
-                    table.insert(Data.Levels, Name)
-                end
-            end
-
-            if not isfolder(Folder) then
-                pcall(makefolder, Folder)
-            end
-            pcall(writefile, SettingsPath, HttpService:JSONEncode(Data))
         end)
     end
 
@@ -16364,6 +17306,15 @@ function Library:CreateConsole(Info)
         end
 
         StatusDirty = true
+    end
+
+    --// Turn the automatic saving of the console settings off / save them by hand \\--
+    function Console:SetAutoSave(Enabled: boolean)
+        AutoSave = Enabled ~= false
+    end
+
+    function Console:SaveNow()
+        WriteSettings()
     end
 
     --// Output API \\--
@@ -17659,6 +18610,614 @@ function Library:Modal(Info)
 
     return Modal
 end
+
+--// Notification center: history of every notification, unread badge on the toolbar bell, do not disturb \\--
+-- Library.NotificationCenter:Show() / :Hide() / :Toggle() / :Clear() / :MarkAllRead() / :SetMuted(true)
+-- Library:Notify({ ..., History = false }) skips the history
+function Library:CreateNotificationCenter(Info)
+    if Library.NotificationCenter then
+        return Library.NotificationCenter
+    end
+
+    Info = typeof(Info) == "table" and Info or {}
+
+    local Center = {
+        History = {},
+        Muted = false,
+        Visible = false,
+        MaxHistory = tonumber(Info.MaxHistory) or 100,
+        Destroyed = false,
+    }
+
+    local IdCounter = 0
+    local Built = false
+    local Frame, List, EmptyLabel, CountLabel, MuteButton
+    local BellButton, BadgeFrame, BadgeLabel
+
+    local function TimeAgo(Time: number): string
+        local Diff = math.max(0, os.time() - Time)
+        if Diff < 10 then
+            return "just now"
+        elseif Diff < 60 then
+            return string.format("%ds ago", Diff)
+        elseif Diff < 3600 then
+            return string.format("%dm ago", Diff // 60)
+        elseif Diff < 86400 then
+            return string.format("%dh ago", Diff // 3600)
+        end
+
+        return os.date("%d %b", Time)
+    end
+
+    local function UnreadCount(): number
+        local Count = 0
+        for _, Entry in Center.History do
+            if not Entry.Read then
+                Count += 1
+            end
+        end
+
+        return Count
+    end
+
+    local function UpdateBadge()
+        local Count = UnreadCount()
+
+        if BadgeFrame then
+            BadgeFrame.Visible = Count > 0 and not Center.Visible
+            BadgeLabel.Text = Count > 9 and "9+" or tostring(Count)
+        end
+        if CountLabel then
+            CountLabel.Text = Count > 0 and string.format("%d new", Count) or ""
+        end
+        if EmptyLabel then
+            EmptyLabel.Visible = #Center.History == 0
+        end
+    end
+
+    local function UpdateRow(Entry)
+        local Row = Entry.Row
+        if not (Row and Row.Frame.Parent) then
+            return
+        end
+
+        Row.Dot.Visible = not Entry.Read
+        Row.Title.Text = Entry.Title .. (Entry.Count > 1 and string.format("  x%d", Entry.Count) or "")
+        Row.Time.Text = TimeAgo(Entry.Time)
+        Row.Description.Text = Entry.Description or ""
+        Row.Description.Visible = Entry.Description ~= nil and Entry.Description ~= ""
+    end
+
+    local function CreateRow(Entry)
+        local Frame_ = New("Frame", {
+            AutomaticSize = Enum.AutomaticSize.Y,
+            BackgroundColor3 = "MainColor",
+            LayoutOrder = -Entry.Id, --// newest first
+            Size = UDim2.new(1, 0, 0, 0),
+            Parent = List,
+        })
+        table.insert(
+            Library.Corners,
+            New("UICorner", {
+                CornerRadius = UDim.new(0, Library.CornerRadius / 2),
+                Parent = Frame_,
+            })
+        )
+        New("UIListLayout", {
+            Padding = UDim.new(0, 3),
+            Parent = Frame_,
+        })
+        New("UIPadding", {
+            PaddingBottom = UDim.new(0, 9),
+            PaddingLeft = UDim.new(0, 10),
+            PaddingRight = UDim.new(0, 10),
+            PaddingTop = UDim.new(0, 9),
+            Parent = Frame_,
+        })
+
+        local TitleRow = New("Frame", {
+            BackgroundTransparency = 1,
+            LayoutOrder = 1,
+            Size = UDim2.new(1, 0, 0, 18),
+            Parent = Frame_,
+        })
+        local Dot = New("Frame", {
+            AnchorPoint = Vector2.new(0, 0.5),
+            BackgroundColor3 = "AccentColor",
+            Position = UDim2.fromScale(0, 0.5),
+            Size = UDim2.fromOffset(7, 7),
+            Parent = TitleRow,
+        })
+        New("UICorner", {
+            CornerRadius = UDim.new(1, 0),
+            Parent = Dot,
+        })
+
+        local IconOffset = 13
+        local Parsed = Entry.Icon and Library:GetCustomIcon(Entry.Icon)
+        if Parsed then
+            local IconImage = New("ImageLabel", {
+                AnchorPoint = Vector2.new(0, 0.5),
+                ImageColor3 = Parsed.Custom and "WhiteColor" or "AccentColor",
+                Position = UDim2.new(0, 13, 0.5, 0),
+                Size = UDim2.fromOffset(14, 14),
+                Parent = TitleRow,
+            })
+            Library:ApplyLucideIcon(IconImage, Parsed)
+            IconOffset = 32
+        end
+
+        local Title = New("TextLabel", {
+            BackgroundTransparency = 1,
+            Position = UDim2.fromOffset(IconOffset, 0),
+            Size = UDim2.new(1, -(IconOffset + 66), 1, 0),
+            Text = "",
+            TextSize = 14,
+            TextTruncate = Enum.TextTruncate.AtEnd,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            Parent = TitleRow,
+        })
+        local TimeLabel = New("TextLabel", {
+            AnchorPoint = Vector2.new(1, 0),
+            BackgroundTransparency = 1,
+            Position = UDim2.new(1, -20, 0, 0),
+            Size = UDim2.new(0, 60, 1, 0),
+            Text = "",
+            TextSize = 12,
+            TextTransparency = 0.55,
+            TextXAlignment = Enum.TextXAlignment.Right,
+            Parent = TitleRow,
+        })
+        local Remove = New("ImageButton", {
+            AnchorPoint = Vector2.new(1, 0.5),
+            BackgroundTransparency = 1,
+            ImageColor3 = "FontColor",
+            ImageTransparency = 0.6,
+            Position = UDim2.fromScale(1, 0.5),
+            Size = UDim2.fromOffset(13, 13),
+            Parent = TitleRow,
+        })
+        local RemoveIcon = Library:GetIcon("x")
+        if RemoveIcon then
+            Library:ApplyLucideIcon(Remove, RemoveIcon)
+        end
+
+        local Description = New("TextLabel", {
+            AutomaticSize = Enum.AutomaticSize.Y,
+            BackgroundTransparency = 1,
+            LayoutOrder = 2,
+            Size = UDim2.new(1, 0, 0, 0),
+            Text = "",
+            TextSize = 13,
+            TextTransparency = 0.3,
+            TextWrapped = true,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            TextYAlignment = Enum.TextYAlignment.Top,
+            Parent = Frame_,
+        })
+
+        Entry.Row = { Frame = Frame_, Dot = Dot, Title = Title, Time = TimeLabel, Description = Description }
+
+        Remove.MouseEnter:Connect(function()
+            TweenService:Create(Remove, Library.TweenInfo, { ImageTransparency = 0 }):Play()
+        end)
+        Remove.MouseLeave:Connect(function()
+            TweenService:Create(Remove, Library.TweenInfo, { ImageTransparency = 0.6 }):Play()
+        end)
+        Remove.MouseButton1Click:Connect(function()
+            local Idx = table.find(Center.History, Entry)
+            if Idx then
+                table.remove(Center.History, Idx)
+            end
+
+            Frame_:Destroy()
+            UpdateBadge()
+        end)
+
+        --// clicking a notification marks it as read \\--
+        Frame_.InputBegan:Connect(function(Input: InputObject)
+            if IsClickInput(Input) and not Entry.Read then
+                Entry.Read = true
+                UpdateRow(Entry)
+                UpdateBadge()
+            end
+        end)
+
+        UpdateRow(Entry)
+    end
+
+    --// API \\--
+    function Center:Record(Data)
+        local Title = Data.Title or "Notification"
+        local Key = tostring(Title) .. "\0" .. tostring(Data.Description)
+
+        --// same as the latest one: stack it \\--
+        local Last = Center.History[#Center.History]
+        if Last and Last.Key == Key then
+            Center:Bump(Last)
+            return Last
+        end
+
+        IdCounter += 1
+        local Entry = {
+            Id = IdCounter,
+            Key = Key,
+            Title = tostring(Title),
+            Description = Data.Description,
+            Icon = Data.Icon or Data.BigIcon,
+            Time = os.time(),
+            Count = 1,
+            Read = Center.Visible,
+        }
+        table.insert(Center.History, Entry)
+
+        while #Center.History > Center.MaxHistory do
+            local Old = table.remove(Center.History, 1)
+            if Old.Row and Old.Row.Frame.Parent then
+                Old.Row.Frame:Destroy()
+            end
+        end
+
+        if Built then
+            CreateRow(Entry)
+        end
+        UpdateBadge()
+
+        return Entry
+    end
+
+    function Center:Bump(Entry)
+        Entry.Count += 1
+        Entry.Time = os.time()
+        Entry.Read = Center.Visible
+
+        UpdateRow(Entry)
+        UpdateBadge()
+    end
+
+    function Center:MarkAllRead()
+        for _, Entry in Center.History do
+            Entry.Read = true
+            UpdateRow(Entry)
+        end
+
+        UpdateBadge()
+    end
+
+    function Center:Clear()
+        for _, Entry in Center.History do
+            if Entry.Row and Entry.Row.Frame.Parent then
+                Entry.Row.Frame:Destroy()
+            end
+        end
+
+        table.clear(Center.History)
+        UpdateBadge()
+    end
+
+    function Center:GetUnread(): number
+        return UnreadCount()
+    end
+
+    function Center:SetMuted(Muted: boolean)
+        Center.Muted = Muted == true
+
+        if MuteButton then
+            local Icon = Library:GetIcon(Center.Muted and "bell-off" or "bell")
+            if Icon then
+                Library:ApplyLucideIcon(MuteButton, Icon)
+            end
+
+            local Key = Center.Muted and "AccentColor" or "FontColor"
+            MuteButton.ImageColor3 = Library.Scheme[Key]
+            Library.Registry[MuteButton].ImageColor3 = Key
+        end
+    end
+
+    --// Window \\--
+    local function CreateIconButton(Parent: GuiObject, Order: number, IconName: string, Fallback: string, Callback: () -> ())
+        local Button = New("ImageButton", {
+            BackgroundTransparency = 1,
+            ImageColor3 = "FontColor",
+            ImageTransparency = 0.45,
+            LayoutOrder = Order,
+            Size = UDim2.fromOffset(18, 18),
+            Parent = Parent,
+        })
+
+        local Icon = Library:GetIcon(IconName)
+        if Icon then
+            Library:ApplyLucideIcon(Button, Icon)
+        else
+            New("TextLabel", {
+                BackgroundTransparency = 1,
+                Size = UDim2.fromScale(1, 1),
+                Text = Fallback,
+                TextSize = 14,
+                Parent = Button,
+            })
+        end
+
+        Button.MouseEnter:Connect(function()
+            TweenService:Create(Button, Library.TweenInfo, { ImageTransparency = 0 }):Play()
+        end)
+        Button.MouseLeave:Connect(function()
+            TweenService:Create(Button, Library.TweenInfo, { ImageTransparency = 0.45 }):Play()
+        end)
+        Button.MouseButton1Click:Connect(Callback)
+
+        return Button
+    end
+
+    local function BuildUI()
+        if Built then
+            return
+        end
+        Built = true
+
+        Frame = New("Frame", {
+            BackgroundColor3 = "BackgroundColor",
+            Size = UDim2.fromOffset(tonumber(Info.Width) or 340, tonumber(Info.Height) or 400),
+            Visible = false,
+            ZIndex = 17,
+            Parent = ScreenGui,
+        })
+        table.insert(
+            Library.Corners,
+            New("UICorner", {
+                CornerRadius = UDim.new(0, Library.CornerRadius),
+                Parent = Frame,
+            })
+        )
+        Library:AddOutline(Frame)
+
+        local FrameScale = New("UIScale", {
+            Parent = Frame,
+        })
+        table.insert(Library.Scales, FrameScale)
+        FrameScale.Scale = Library.DPIScale
+
+        local Header = New("Frame", {
+            BackgroundTransparency = 1,
+            Size = UDim2.new(1, 0, 0, 38),
+            Parent = Frame,
+        })
+        New("UIListLayout", {
+            FillDirection = Enum.FillDirection.Horizontal,
+            Padding = UDim.new(0, 8),
+            VerticalAlignment = Enum.VerticalAlignment.Center,
+            Parent = Header,
+        })
+        New("UIPadding", {
+            PaddingLeft = UDim.new(0, 12),
+            PaddingRight = UDim.new(0, 10),
+            Parent = Header,
+        })
+
+        local TitleLabel = New("TextLabel", {
+            AutomaticSize = Enum.AutomaticSize.X,
+            BackgroundTransparency = 1,
+            LayoutOrder = 1,
+            Size = UDim2.new(0, 0, 1, 0),
+            Text = "Notifications",
+            TextSize = 15,
+            Parent = Header,
+        })
+        CountLabel = New("TextLabel", {
+            BackgroundTransparency = 1,
+            LayoutOrder = 2,
+            Size = UDim2.new(0, 0, 1, 0),
+            Text = "",
+            TextColor3 = "AccentColor",
+            TextSize = 12,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            Parent = Header,
+        })
+        New("UIFlexItem", {
+            FlexMode = Enum.UIFlexMode.Grow,
+            Parent = CountLabel,
+        })
+
+        MuteButton = CreateIconButton(Header, 3, "bell", "Z", function()
+            Center:SetMuted(not Center.Muted)
+        end)
+        CreateIconButton(Header, 4, "check-check", "R", function()
+            Center:MarkAllRead()
+        end)
+        CreateIconButton(Header, 5, "trash-2", "C", function()
+            Center:Clear()
+        end)
+        CreateIconButton(Header, 6, "x", "X", function()
+            Center:SetVisible(false)
+        end)
+
+        Library:MakeLine(Frame, {
+            Position = UDim2.fromOffset(0, 38),
+            Size = UDim2.new(1, 0, 0, 1),
+        })
+
+        List = New("ScrollingFrame", {
+            AutomaticCanvasSize = Enum.AutomaticSize.Y,
+            BackgroundTransparency = 1,
+            CanvasSize = UDim2.fromOffset(0, 0),
+            Position = UDim2.fromOffset(0, 39),
+            ScrollBarThickness = 0,
+            ScrollingDirection = Enum.ScrollingDirection.Y,
+            Size = UDim2.new(1, 0, 1, -39),
+            Parent = Frame,
+        })
+        New("UIListLayout", {
+            Padding = UDim.new(0, 6),
+            Parent = List,
+        })
+        New("UIPadding", {
+            PaddingBottom = UDim.new(0, 8),
+            PaddingLeft = UDim.new(0, 8),
+            PaddingRight = UDim.new(0, 8),
+            PaddingTop = UDim.new(0, 8),
+            Parent = List,
+        })
+
+        EmptyLabel = New("TextLabel", {
+            AnchorPoint = Vector2.new(0.5, 0.5),
+            BackgroundTransparency = 1,
+            Position = UDim2.new(0.5, 0, 0.5, 20),
+            Size = UDim2.fromOffset(200, 20),
+            Text = "No notifications",
+            TextSize = 14,
+            TextTransparency = 0.6,
+            Parent = Frame,
+        })
+
+        Library:MakeDraggable(Frame, Header, true)
+        table.insert(Library.DraggableElements, Frame)
+
+        Center:SetMuted(Center.Muted)
+        for _, Entry in Center.History do
+            CreateRow(Entry)
+        end
+        UpdateBadge()
+    end
+
+    local function Reposition()
+        if not Frame then
+            return
+        end
+
+        local Camera = workspace.CurrentCamera
+        local Viewport = Camera and Camera.ViewportSize or Vector2.new(1280, 720)
+        local Scale = Library.DPIScale
+        local Size = Frame.Size
+        local Width, Height = Size.X.Offset, Size.Y.Offset
+
+        local X, Y = Viewport.X / Scale - Width - 8, 56
+        if BellButton and BellButton.Base and BellButton.Base.Parent then
+            local Base = BellButton.Base
+            X = (Base.AbsolutePosition.X + Base.AbsoluteSize.X / 2) / Scale - Width / 2
+            Y = (Base.AbsolutePosition.Y + Base.AbsoluteSize.Y) / Scale + 10
+        end
+
+        X = math.clamp(X, 6, math.max(6, Viewport.X / Scale - Width - 6))
+        Y = math.clamp(Y, 6, math.max(6, Viewport.Y / Scale - Height - 6))
+        Frame.Position = UDim2.fromOffset(X, Y)
+    end
+
+    function Center:SetVisible(Visible: boolean)
+        Visible = Visible == true
+        if Center.Destroyed or Center.Visible == Visible then
+            return
+        end
+
+        if Visible then
+            BuildUI()
+            Reposition()
+        end
+
+        Center.Visible = Visible
+        if Frame then
+            Frame.Visible = Visible
+        end
+
+        --// what you saw while it was open counts as read once it closes \\--
+        if not Visible then
+            Center:MarkAllRead()
+        end
+        UpdateBadge()
+
+        if BellButton then
+            BellButton:SetActive(Visible, true)
+        end
+    end
+
+    function Center:Show()
+        Center:SetVisible(true)
+    end
+    function Center:Hide()
+        Center:SetVisible(false)
+    end
+    function Center:Toggle()
+        Center:SetVisible(not Center.Visible)
+    end
+
+    --// Binds the toolbar bell (adds the unread badge to it) \\--
+    function Center:AttachButton(Button)
+        BellButton = Button
+        local Base = Button.Base
+
+        BadgeFrame = New("Frame", {
+            AnchorPoint = Vector2.new(1, 0),
+            BackgroundColor3 = Color3.fromRGB(255, 80, 80),
+            Position = UDim2.new(1, -1, 0, 1),
+            Size = UDim2.fromOffset(14, 14),
+            Visible = false,
+            ZIndex = Base.ZIndex + 3,
+            Parent = Base,
+        })
+        New("UICorner", {
+            CornerRadius = UDim.new(1, 0),
+            Parent = BadgeFrame,
+        })
+        BadgeLabel = New("TextLabel", {
+            BackgroundTransparency = 1,
+            Size = UDim2.fromScale(1, 1),
+            Text = "",
+            TextColor3 = Color3.new(1, 1, 1),
+            TextSize = 10,
+            ZIndex = Base.ZIndex + 4,
+            Parent = BadgeFrame,
+        })
+
+        UpdateBadge()
+    end
+
+    function Center:Destroy()
+        Center.Destroyed = true
+
+        local Idx = table.find(Library.DraggableElements, Frame)
+        if Idx then
+            table.remove(Library.DraggableElements, Idx)
+        end
+        if Frame then
+            Frame:Destroy()
+        end
+
+        Library.NotificationCenter = nil
+    end
+
+    --// click outside closes the panel \\--
+    Library:GiveSignal(UserInputService.InputBegan:Connect(function(Input: InputObject)
+        if Center.Destroyed or not Center.Visible or not Frame then
+            return
+        end
+        if not IsClickInput(Input, true) then
+            return
+        end
+
+        local Position = Input.Position
+        local OverBell = BellButton and BellButton.Base and Library:MouseIsOverFrame(BellButton.Base, Position)
+        if not Library:MouseIsOverFrame(Frame, Position) and not OverBell and not CurrentMenu then
+            Center:SetVisible(false)
+        end
+    end))
+
+    --// keeps the "5m ago" labels fresh while open \\--
+    local LastRefresh = 0
+    Library:GiveSignal(RunService.Heartbeat:Connect(function()
+        if not Center.Visible or os.clock() - LastRefresh < 15 then
+            return
+        end
+
+        LastRefresh = os.clock()
+        for _, Entry in Center.History do
+            UpdateRow(Entry)
+        end
+    end))
+
+    Library.NotificationCenter = Center
+    return Center
+end
+
+Library:CreateNotificationCenter()
 
 function Library:CreateWindow(WindowInfo)
     WindowInfo = Library:Validate(WindowInfo, Templates.Window)
@@ -22152,6 +23711,21 @@ function Library:CreateWindow(WindowInfo)
                 end,
             })
 
+            Toolbar.NotificationsButton = Toolbar:AddButton({
+                Icon = "bell",
+                Tooltip = "Notifications",
+                Toggle = true,
+                Active = false,
+                Callback = function(Active)
+                    if Library.NotificationCenter then
+                        Library.NotificationCenter:SetVisible(Active)
+                    end
+                end,
+            })
+            if Library.NotificationCenter then
+                Library.NotificationCenter:AttachButton(Toolbar.NotificationsButton)
+            end
+
             Toolbar.ConsoleButton = Toolbar:AddButton({
                 Icon = "terminal",
                 Tooltip = "Console",
@@ -22929,6 +24503,37 @@ function Library:SetSettingsTab(Tab, Info)
         return Ok and Data or nil
     end
 
+    --// Options of the settings tab itself (always saved, so they work before everything else loads) \\--
+    local OptionsPath = Folder .. "/options.json"
+    local ConfigOptions = {
+        AutoSaveUI = true, -- remember UI settings (ui.json)
+        AutoSaveConsole = true, -- remember console settings (console.json)
+        AutoloadConfig = true, -- apply the autoload config on startup
+        AutoloadTheme = true, -- apply the default theme on startup
+        AutoSaveConfig = false, -- periodically save the current settings into the autoload config
+        AutoSaveInterval = 60,
+        BackupOnOverwrite = true, -- keeps the old file as name.json.bak
+        NotifyActions = true, -- toasts for config / theme actions
+    }
+    do
+        local SavedOptions = ReadJSON(OptionsPath)
+        if typeof(SavedOptions) == "table" then
+            for Key, Default in ConfigOptions do
+                if typeof(SavedOptions[Key]) == typeof(Default) then
+                    ConfigOptions[Key] = SavedOptions[Key]
+                end
+            end
+        end
+    end
+
+    local function SaveOptions()
+        Write(OptionsPath, HttpService:JSONEncode(ConfigOptions))
+    end
+
+    if Library.Console then
+        Library.Console:SetAutoSave(ConfigOptions.AutoSaveConsole)
+    end
+
     local function ListNames(Path: string): { string }
         local Names = {}
         if not HasFS then
@@ -22958,20 +24563,31 @@ function Library:SetSettingsTab(Tab, Info)
     end
 
     local function Note(Title: string, Text: string)
+        if ConfigOptions.NotifyActions == false then
+            return
+        end
+
         Library:Notify({ Title = Title, Description = Text, Time = 3 })
     end
 
     --// UI state (remembered between sessions) \\--
     local UIState = ReadJSON(UIPath) or {}
     local SaveToken = 0
+    local function WriteUI()
+        Write(UIPath, HttpService:JSONEncode(UIState))
+    end
     local function Remember(Key: string, Value: any)
         UIState[Key] = Value
+
+        if not ConfigOptions.AutoSaveUI then
+            return --// kept in memory only, use "Save UI settings now"
+        end
 
         SaveToken += 1
         local Token = SaveToken
         task.delay(0.6, function()
             if Token == SaveToken then
-                Write(UIPath, HttpService:JSONEncode(UIState))
+                WriteUI()
             end
         end)
     end
@@ -23107,10 +24723,27 @@ function Library:SetSettingsTab(Tab, Info)
         return ConfigFolder .. "/" .. Name .. ".json"
     end
 
+    function Settings:SaveUI()
+        WriteUI()
+    end
+
+    function Settings:SaveOptions()
+        SaveOptions()
+    end
+
+    Settings.Options = ConfigOptions
+
     function Settings:SaveConfig(Name: string): boolean
         Name = SafeName(Name)
         if Name == "" then
             return false
+        end
+
+        if ConfigOptions.BackupOnOverwrite then
+            local Previous = Read(ConfigPath(Name))
+            if Previous then
+                Write(ConfigPath(Name) .. ".bak", Previous)
+            end
         end
 
         return Write(ConfigPath(Name), HttpService:JSONEncode(SerializeConfig()))
@@ -23269,6 +24902,92 @@ function Library:SetSettingsTab(Tab, Info)
         })
         ShareBox:AddDivider()
         ShareBox:AddLabel("Configs save every toggle, slider, dropdown, input, keybind and color picker that has an index.", true)
+
+        --// Options \\--
+        local OptBox = Page:AddGroupbox({ Side = 2, Name = "Options", IconName = "sliders-horizontal" })
+        local OptionApply = {
+            AutoSaveConsole = function(Value)
+                if Library.Console then
+                    Library.Console:SetAutoSave(Value)
+                end
+            end,
+        }
+
+        local function Opt(Key: string, Text: string, Tooltip: string?)
+            OptBox:AddToggle("Octo_Opt_" .. Key, {
+                Text = Text,
+                Tooltip = Tooltip,
+                Default = ConfigOptions[Key],
+                Callback = function(Value)
+                    ConfigOptions[Key] = Value
+                    if OptionApply[Key] then
+                        OptionApply[Key](Value)
+                    end
+
+                    SaveOptions()
+                end,
+            })
+        end
+
+        Opt("AutoSaveUI", "Auto-save UI settings", "Off: UI settings only live until you leave (use Save UI settings now)")
+        Opt("AutoSaveConsole", "Auto-save console settings")
+        Opt("AutoloadConfig", "Autoload config on startup")
+        Opt("AutoloadTheme", "Autoload default theme on startup")
+        Opt("BackupOnOverwrite", "Backup before overwrite", "Keeps the previous file next to it as name.json.bak")
+        Opt("NotifyActions", "Notify on config actions")
+
+        OptBox:AddDivider("Auto-save config")
+        Opt("AutoSaveConfig", "Save into the autoload config", "Needs an autoload config. Only writes when something changed.")
+        OptBox:AddSlider("Octo_Opt_AutoSaveInterval", {
+            Text = "Interval",
+            Default = ConfigOptions.AutoSaveInterval,
+            Min = 15,
+            Max = 600,
+            Rounding = 0,
+            Suffix = "s",
+            Callback = function(Value)
+                ConfigOptions.AutoSaveInterval = Value
+                SaveOptions()
+            end,
+        })
+
+        OptBox:AddDivider("Saved data")
+        local DataRow = OptBox:AddRow()
+        DataRow:AddButton({
+            Text = "Save UI now",
+            Func = function()
+                WriteUI()
+                Note("Config", "UI settings saved.")
+            end,
+        })
+        DataRow:AddButton({
+            Text = "Save console now",
+            Func = function()
+                if Library.Console then
+                    Library.Console:SaveNow()
+                end
+                Note("Config", "Console settings saved.")
+            end,
+        })
+        OptBox:AddButton({
+            Text = "Delete saved UI data",
+            Risky = true,
+            DoubleClick = true,
+            Tooltip = "Deletes ui.json, console.json and options.json (configs and themes stay)",
+            Func = function()
+                if typeof(delfile) == "function" then
+                    for _, Path in { UIPath, Folder .. "/console.json", OptionsPath } do
+                        if HasFS and isfile(Path) then
+                            pcall(delfile, Path)
+                        end
+                    end
+                end
+
+                SaveToken += 1 --// cancels a pending save
+                table.clear(UIState)
+                Note("Config", "Saved UI data deleted.")
+            end,
+        })
     end
 
     --// Theme page \\--
@@ -23509,7 +25228,7 @@ function Library:SetSettingsTab(Tab, Info)
         )
 
         Applying = false
-        if CurrentDefault and Trim(CurrentDefault) ~= "" then
+        if CurrentDefault and Trim(CurrentDefault) ~= "" and ConfigOptions.AutoloadTheme ~= false then
             ApplyThemeData(ReadJSON(ThemePath(Trim(CurrentDefault))))
         end
     end
@@ -23611,6 +25330,24 @@ function Library:SetSettingsTab(Tab, Info)
         })
 
         Box:AddDivider("Notifications")
+        Box:AddToggle("Octo_UI_Muted", {
+            Text = "Do not disturb (no popups)",
+            Tooltip = "Notifications are still collected in the notification center",
+            Default = Bind("Octo_UI_Muted", false, function(Value)
+                if Library.NotificationCenter then
+                    Library.NotificationCenter:SetMuted(Value)
+                end
+            end),
+            Callback = Changed("Octo_UI_Muted"),
+        })
+        Box:AddButton({
+            Text = "Open notification center",
+            Func = function()
+                if Library.NotificationCenter then
+                    Library.NotificationCenter:Show()
+                end
+            end,
+        })
         Box:AddDropdown("Octo_UI_NotifySide", {
             Text = "Side",
             Values = { "Left", "Right" },
@@ -23775,7 +25512,33 @@ function Library:SetSettingsTab(Tab, Info)
         Library.Toolbar.SettingsButton:SetVisible(true)
     end
 
-    Settings:LoadAutoload()
+    if ConfigOptions.AutoloadConfig ~= false then
+        Settings:LoadAutoload()
+    end
+
+    --// periodically writes the current settings into the autoload config \--
+    task.spawn(function()
+        local LastJson, Elapsed = nil, 0
+
+        while Library.SettingsTab == Settings and not Library.Unloaded do
+            task.wait(1)
+            Elapsed += 1
+
+            if ConfigOptions.AutoSaveConfig and Elapsed >= ConfigOptions.AutoSaveInterval then
+                Elapsed = 0
+
+                local AutoName = Read(ConfigFolder .. "/autoload.txt")
+                if AutoName and Trim(AutoName) ~= "" then
+                    local Json = HttpService:JSONEncode(SerializeConfig())
+                    if Json ~= LastJson then
+                        LastJson = Json
+                        Write(ConfigPath(Trim(AutoName)), Json)
+                    end
+                end
+            end
+        end
+    end)
+
     return Settings
 end
 
@@ -23855,6 +25618,9 @@ function Library:Unload()
 
     if Library.Console then
         Library.Console:Destroy()
+    end
+    if Library.NotificationCenter then
+        Library.NotificationCenter:Destroy()
     end
 
     if ScreenGui then
