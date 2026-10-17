@@ -12,6 +12,7 @@ local Teams: Teams = cloneref(game:GetService("Teams"))
 local TweenService: TweenService = cloneref(game:GetService("TweenService"))
 local HttpService: HttpService = cloneref(game:GetService("HttpService"))
 local LogService = cloneref(game:GetService("LogService"))
+local Lighting = cloneref(game:GetService("Lighting"))
 local MarketplaceService: MarketplaceService = cloneref(game:GetService("MarketplaceService"))
 local Stats = cloneref(game:GetService("Stats"))
 
@@ -403,6 +404,7 @@ local Templates = {
 
         AutoShow = true,
         AccentLine = true, -- thin accent line along the top of the window
+        Background = {}, -- { Mode = "Image" | "Gradient" | "Animated" | "Accent", Image, ImageTransparency, ScaleType, Colors, Rotation, Speed, Tint, ContentTransparency, WindowTransparency, Blur }
         Center = true,
         Resizable = true,
         AlwaysOnTop = false,
@@ -19326,6 +19328,8 @@ function Library:CreateWindow(WindowInfo)
     local Container
     local BackgroundImage
     local HasBackgroundImage = false
+    local Backdrop, BackdropGradient, BackdropGradientObject, BackdropTint
+    local ApplyBackground, UpdateBlur
     local BottomBackground
     local BottomBackgroundCorner
     local FooterLabel
@@ -19475,52 +19479,50 @@ function Library:CreateWindow(WindowInfo)
             ZIndex = 2
         })
 
-        local BackgroundIcon = Library:GetCustomIcon(WindowInfo.BackgroundImage)
-        HasBackgroundImage = BackgroundIcon ~= nil
-        BackgroundImage = New("ImageLabel", {
-            Active = false,
-            Position = UDim2.fromScale(0, 0),
-            Size = UDim2.fromScale(1, 1),
-            ScaleType = Enum.ScaleType.Stretch,
-            ZIndex = Overlay.ZIndex + 1,
+        --// Backdrop: sits behind all the content (image, gradient and tint layers) \\--
+        Backdrop = New("Frame", {
             BackgroundTransparency = 1,
-            ImageTransparency = 0.75,
+            ClipsDescendants = true,
+            Size = UDim2.fromScale(1, 1),
             Visible = false,
-            Parent = ScreenGui,
+            ZIndex = -1,
+            Parent = MainFrame,
         })
-        if BackgroundIcon then
-            Library:ApplyLucideIcon(BackgroundImage, BackgroundIcon)
-        end
-
         table.insert(
             Library.Corners,
             New("UICorner", {
                 CornerRadius = UDim.new(0, WindowInfo.CornerRadius),
-                Parent = BackgroundImage,
+                Parent = Backdrop,
             })
         )
 
-        Library:GiveSignal(RunService.RenderStepped:Connect(function()
-            if not (BackgroundImage and MainFrame) then
-                return
-            end
-
-            local ShouldShow = HasBackgroundImage and MainFrame.Visible
-            BackgroundImage.Visible = ShouldShow
-
-            if not ShouldShow then
-                return
-            end
-
-            BackgroundImage.Position = UDim2.fromOffset(
-                MainFrame.AbsolutePosition.X,
-                MainFrame.AbsolutePosition.Y
-            )
-            BackgroundImage.Size = UDim2.fromOffset(
-                MainFrame.AbsoluteSize.X,
-                MainFrame.AbsoluteSize.Y
-            )
-        end))
+        BackgroundImage = New("ImageLabel", {
+            BackgroundTransparency = 1,
+            ImageTransparency = 0.35,
+            ScaleType = Enum.ScaleType.Crop,
+            Size = UDim2.fromScale(1, 1),
+            Visible = false,
+            ZIndex = 1,
+            Parent = Backdrop,
+        })
+        BackdropGradient = New("Frame", {
+            BackgroundColor3 = Color3.new(1, 1, 1),
+            BackgroundTransparency = 0.45,
+            Size = UDim2.fromScale(1, 1),
+            Visible = false,
+            ZIndex = 2,
+            Parent = Backdrop,
+        })
+        BackdropGradientObject = New("UIGradient", {
+            Parent = BackdropGradient,
+        })
+        BackdropTint = New("Frame", {
+            BackgroundColor3 = Color3.new(0, 0, 0),
+            BackgroundTransparency = 1,
+            Size = UDim2.fromScale(1, 1),
+            ZIndex = 3,
+            Parent = Backdrop,
+        })
 
         if WindowInfo.Center then
             MainFrame.Position = UDim2.new(0.5, -MainFrame.Size.X.Offset / 2, 0.5, -MainFrame.Size.Y.Offset / 2)
@@ -20094,6 +20096,173 @@ function Library:CreateWindow(WindowInfo)
 
         HasBackgroundImage = ValidIcon
         WindowInfo.BackgroundImage = Image
+
+        if ValidIcon and ApplyBackground then
+            if Window.Background.Mode == "None" then
+                Window.Background.Mode = "Image"
+            end
+
+            ApplyBackground()
+        elseif ApplyBackground then
+            ApplyBackground()
+        end
+    end
+
+    --// Window background \\--
+    -- Window:SetBackground({ Mode = "Image", Image = 12345, ImageTransparency = 0.3, ScaleType = "Crop" })
+    -- Window:SetBackground({ Mode = "Gradient" | "Animated" | "Accent", Colors = { Color3, Color3 }, Rotation = 35, Speed = 25 })
+    -- Window:SetBackground({ ContentTransparency = 0.35, WindowTransparency = 0, Blur = 8, Tint = Color3, TintTransparency = 0.6 })
+    Window.Background = {
+        Mode = "None", -- "None" | "Image" | "Gradient" | "Animated" | "Accent" (accent glow, follows the theme)
+
+        ImageTransparency = 0.35,
+        ScaleType = "Crop", -- "Crop" | "Fit" | "Stretch" | "Tile"
+
+        Colors = { Color3.fromRGB(110, 103, 255), Color3.fromRGB(255, 92, 150) },
+        Rotation = 35,
+        Speed = 25, -- degrees per second (Animated / Accent)
+        GradientTransparency = 0.45,
+
+        Tint = Color3.new(0, 0, 0),
+        TintTransparency = 1, -- 1 = no tint
+
+        ContentTransparency = 0.35, -- how much of the background shows through the sidebar / pages
+        WindowTransparency = 0, -- see through the whole window
+        Blur = 0, -- blurs the game behind the window while it is open
+    }
+
+    local BackgroundModes = { "None", "Image", "Gradient", "Animated", "Accent" }
+    local ScaleTypes = { Crop = Enum.ScaleType.Crop, Fit = Enum.ScaleType.Fit, Stretch = Enum.ScaleType.Stretch, Tile = Enum.ScaleType.Tile }
+
+    local function BuildSequence(Colors: { Color3 })
+        local Keypoints = {}
+        for Index, Color in Colors do
+            table.insert(Keypoints, ColorSequenceKeypoint.new((Index - 1) / math.max(#Colors - 1, 1), Color))
+        end
+
+        return ColorSequence.new(Keypoints)
+    end
+
+    local function AccentColors(): { Color3 }
+        local H, S, V = Library.Scheme.AccentColor:ToHSV()
+        return {
+            Library.Scheme.AccentColor,
+            Color3.fromHSV((H + 0.12) % 1, math.clamp(S, 0.4, 1), V),
+            Color3.fromHSV((H + 0.5) % 1, math.clamp(S * 0.8, 0.3, 1), V * 0.8),
+        }
+    end
+
+    ApplyBackground = function()
+        local State = Window.Background
+        local Mode = State.Mode
+        local HasBackdrop = Mode ~= "None"
+        local IsGradient = Mode == "Gradient" or Mode == "Animated" or Mode == "Accent"
+
+        Backdrop.Visible = HasBackdrop
+
+        BackgroundImage.Visible = HasBackdrop and HasBackgroundImage
+        BackgroundImage.ImageTransparency = State.ImageTransparency
+        BackgroundImage.ScaleType = ScaleTypes[State.ScaleType] or Enum.ScaleType.Crop
+        BackgroundImage.TileSize = UDim2.fromOffset(128, 128)
+
+        BackdropGradient.Visible = HasBackdrop and IsGradient
+        BackdropGradient.BackgroundTransparency = State.GradientTransparency
+        if Mode == "Accent" then
+            BackdropGradientObject.Color = BuildSequence(AccentColors())
+            Library.Registry[BackdropGradientObject] = {
+                Color = function()
+                    return BuildSequence(AccentColors())
+                end,
+            }
+        else
+            Library.Registry[BackdropGradientObject] = nil
+
+            local Colors = typeof(State.Colors) == "table" and #State.Colors >= 2 and State.Colors or AccentColors()
+            BackdropGradientObject.Color = BuildSequence(Colors)
+        end
+        if Mode ~= "Animated" and Mode ~= "Accent" then
+            BackdropGradientObject.Rotation = State.Rotation
+        end
+
+        BackdropTint.BackgroundColor3 = State.Tint
+        BackdropTint.BackgroundTransparency = State.TintTransparency
+
+        --// the sidebar / pages / footer let the background through \\--
+        local Cover = HasBackdrop and State.ContentTransparency or 0
+        local Effective = math.max(Cover, State.WindowTransparency)
+
+        MainFrame.BackgroundTransparency = State.WindowTransparency
+        Tabs.BackgroundTransparency = Effective
+        Container.BackgroundTransparency = Effective
+        BottomBackground.BackgroundTransparency = Effective
+    end
+
+    local BlurEffect
+    UpdateBlur = function()
+        local Size = (Library.Toggled and Window.Background.Blur > 0) and Window.Background.Blur or 0
+
+        if Size > 0 and not BlurEffect then
+            BlurEffect = Instance.new("BlurEffect")
+            BlurEffect.Name = "OctoBlur"
+            BlurEffect.Size = 0
+            BlurEffect.Parent = Lighting
+            Library.BlurEffect = BlurEffect
+        end
+
+        if BlurEffect then
+            TweenService:Create(BlurEffect, Library.WindowAnimationInfo, { Size = Size }):Play()
+        end
+    end
+
+    Library:GiveSignal(RunService.RenderStepped:Connect(function(DeltaTime)
+        local Mode = Window.Background.Mode
+        if (Mode == "Animated" or Mode == "Accent") and Backdrop.Visible and MainFrame.Visible then
+            BackdropGradientObject.Rotation = (BackdropGradientObject.Rotation + Window.Background.Speed * DeltaTime) % 360
+        end
+    end))
+
+    --// Merges the given keys, everything else stays as it is \\--
+    function Window:SetBackground(NewState: { [string]: any })
+        assert(typeof(NewState) == "table", "Window:SetBackground expects a table")
+
+        local State = Window.Background
+        for Key, Value in NewState do
+            if Key == "Image" then
+                Window:SetBackgroundImage(Value or "")
+            elseif Key == "Mode" then
+                if table.find(BackgroundModes, Value) then
+                    State.Mode = Value
+                end
+            elseif State[Key] ~= nil then
+                if Key == "ImageTransparency" or Key == "GradientTransparency" or Key == "TintTransparency" or Key == "ContentTransparency" or Key == "WindowTransparency" then
+                    Value = math.clamp(tonumber(Value) or State[Key], 0, 1)
+                elseif Key == "Blur" then
+                    Value = math.clamp(tonumber(Value) or 0, 0, 56)
+                end
+
+                State[Key] = Value
+            end
+        end
+
+        ApplyBackground()
+        UpdateBlur()
+    end
+
+    function Window:SetBackgroundMode(Mode: string)
+        Window:SetBackground({ Mode = Mode })
+    end
+
+    --// see through window (also lets the backdrop show) \\--
+    function Window:SetTransparency(Value: number)
+        Window:SetBackground({ WindowTransparency = Value })
+    end
+
+    function Window:SetBlur(Size: number)
+        Window:SetBackground({ Blur = Size })
+    end
+
+    function Window:GetBackground()
+        return table.clone(Window.Background)
     end
 
     function Window:SetFooter(Footer: string)
@@ -23432,6 +23601,10 @@ function Library:CreateWindow(WindowInfo)
             MainFrame.Visible = Library.Toggled
         end
 
+        if UpdateBlur then
+            UpdateBlur()
+        end
+
         if Library.Toolbar and Library.Toolbar.MenuButton then
             Library.Toolbar.MenuButton:SetActive(Library.Toggled, true)
         end
@@ -23649,6 +23822,18 @@ function Library:CreateWindow(WindowInfo)
     Window.MainFrame = MainFrame
     Window.WindowInfo = WindowInfo
     Library.Window = Window
+
+    do
+        local Initial = typeof(WindowInfo.Background) == "table" and table.clone(WindowInfo.Background) or {}
+        if Initial.Image == nil and WindowInfo.BackgroundImage ~= "" then
+            Initial.Image = WindowInfo.BackgroundImage
+        end
+        if Initial.Mode == nil and Initial.Image ~= nil and Initial.Image ~= "" then
+            Initial.Mode = "Image"
+        end
+
+        Window:SetBackground(Initial)
+    end
 
     function Window:AddToolbarButton(ButtonInfo)
         return Library:CreateToolbar({}):AddButton(ButtonInfo)
@@ -25227,6 +25412,152 @@ function Library:SetSettingsTab(Tab, Info)
             (CurrentDefault and Trim(CurrentDefault) ~= "") and ("Default theme: " .. Library:Copyable(Trim(CurrentDefault))) or "Default theme: none"
         )
 
+
+        --// Window background (remembered between sessions) \\--
+        local BGBox = Page:AddGroupbox({ Side = 2, Name = "Window background", IconName = "image" })
+
+        local function Update(NewState)
+            if Window then
+                Window:SetBackground(NewState)
+            end
+        end
+
+        BGBox:AddDropdown("Octo_BG_Mode", {
+            Text = "Mode",
+            Values = { "None", "Image", "Gradient", "Animated", "Accent" },
+            Default = Bind("Octo_BG_Mode", "None", function(Value)
+                Update({ Mode = Value })
+            end),
+            Callback = Changed("Octo_BG_Mode"),
+        })
+
+        BGBox:AddInput("Octo_BG_Image", {
+            Text = "Image (asset id or URL)",
+            Placeholder = "rbxassetid://... or https://...",
+            Finished = true,
+            Default = Bind("Octo_BG_Image", "", function(Value)
+                Update({ Image = Value })
+            end),
+            Callback = Changed("Octo_BG_Image"),
+        })
+
+        local function BGDropdown(Key: string, Text: string, Values: { string }, Default: string, Field: string)
+            BGBox:AddDropdown(Key, {
+                Text = Text,
+                Values = Values,
+                Default = Bind(Key, Default, function(Value)
+                    Update({ [Field] = Value })
+                end),
+                Callback = Changed(Key),
+            })
+        end
+
+        local function BGSlider(Key: string, Text: string, Min: number, Max: number, Rounding: number, Default: number, Field: string, Suffix: string?)
+            BGBox:AddSlider(Key, {
+                Text = Text,
+                Default = Bind(Key, Default, function(Value)
+                    Update({ [Field] = Value })
+                end),
+                Min = Min,
+                Max = Max,
+                Rounding = Rounding,
+                Suffix = Suffix or "",
+                Callback = Changed(Key),
+            })
+        end
+
+        BGBox:AddDivider("Image")
+        BGDropdown("Octo_BG_ScaleType", "Scale type", { "Crop", "Fit", "Stretch", "Tile" }, "Crop", "ScaleType")
+        BGSlider("Octo_BG_ImageTransparency", "Image transparency", 0, 1, 2, 0.35, "ImageTransparency")
+
+        BGBox:AddDivider("Gradient")
+        local SavedColors = typeof(UIState.Octo_BG_Colors) == "table" and UIState.Octo_BG_Colors or {}
+        local function SavedColor(Index: number, Fallback: Color3): Color3
+            local Ok, Color = pcall(Color3.fromHex, SavedColors[Index])
+            return (Ok and Color) or Fallback
+        end
+
+        local BGColors = {
+            SavedColor(1, Color3.fromRGB(110, 103, 255)),
+            SavedColor(2, Color3.fromRGB(255, 92, 150)),
+            SavedColor(3, Color3.new(0, 0, 0)), -- tint
+        }
+        local BGReady = false
+
+        local function BGColorsChanged()
+            if not BGReady then
+                return
+            end
+
+            Update({ Colors = { BGColors[1], BGColors[2] }, Tint = BGColors[3] })
+            Remember("Octo_BG_Colors", { BGColors[1]:ToHex(), BGColors[2]:ToHex(), BGColors[3]:ToHex() })
+        end
+
+        BGBox:AddLabel("Color 1"):AddColorPicker("Octo_BG_C1", {
+            Default = BGColors[1],
+            Callback = function(Color)
+                BGColors[1] = Color
+                BGColorsChanged()
+            end,
+        })
+        BGBox:AddLabel("Color 2"):AddColorPicker("Octo_BG_C2", {
+            Default = BGColors[2],
+            Callback = function(Color)
+                BGColors[2] = Color
+                BGColorsChanged()
+            end,
+        })
+        BGSlider("Octo_BG_GradientTransparency", "Gradient transparency", 0, 1, 2, 0.45, "GradientTransparency")
+        BGSlider("Octo_BG_Rotation", "Angle", 0, 360, 0, 35, "Rotation", "°")
+        BGSlider("Octo_BG_Speed", "Animation speed", 0, 180, 0, 25, "Speed", "°/s")
+
+        BGBox:AddDivider("Tint & glass")
+        BGBox:AddLabel("Tint color"):AddColorPicker("Octo_BG_Tint", {
+            Default = BGColors[3],
+            Callback = function(Color)
+                BGColors[3] = Color
+                BGColorsChanged()
+            end,
+        })
+        BGSlider("Octo_BG_TintTransparency", "Tint transparency (1 = off)", 0, 1, 2, 1, "TintTransparency")
+        BGSlider("Octo_BG_ContentTransparency", "Content transparency", 0, 1, 2, 0.35, "ContentTransparency")
+        BGSlider("Octo_BG_WindowTransparency", "Window transparency", 0, 0.8, 2, 0, "WindowTransparency")
+        BGSlider("Octo_BG_Blur", "Game blur while open", 0, 24, 0, 0, "Blur")
+
+        BGBox:AddDivider()
+        BGBox:AddButton({
+            Text = "Reset background",
+            DoubleClick = true,
+            Func = function()
+                for Key, Default in Defaults do
+                    if Key:sub(1, 8) == "Octo_BG_" then
+                        local Object = Toggles[Key] or Options[Key]
+                        if Object then
+                            pcall(function()
+                                Object:SetValue(Default)
+                            end)
+                        end
+                    end
+                end
+
+                pcall(function()
+                    Options.Octo_BG_C1:SetValueRGB(Color3.fromRGB(110, 103, 255))
+                    Options.Octo_BG_C2:SetValueRGB(Color3.fromRGB(255, 92, 150))
+                    Options.Octo_BG_Tint:SetValueRGB(Color3.new(0, 0, 0))
+                end)
+                Update({ Mode = "None", Image = "" })
+            end,
+        })
+
+        --// apply the remembered values \\--
+        BGReady = true
+        Update({ Colors = { BGColors[1], BGColors[2] }, Tint = BGColors[3] })
+        for Key, Setter in Effects do
+            if Key:sub(1, 8) == "Octo_BG_" and UIState[Key] ~= nil then
+                pcall(Setter, UIState[Key])
+            end
+        end
+
         Applying = false
         if CurrentDefault and Trim(CurrentDefault) ~= "" and ConfigOptions.AutoloadTheme ~= false then
             ApplyThemeData(ReadJSON(ThemePath(Trim(CurrentDefault))))
@@ -25621,6 +25952,10 @@ function Library:Unload()
     end
     if Library.NotificationCenter then
         Library.NotificationCenter:Destroy()
+    end
+    if Library.BlurEffect then
+        Library.BlurEffect:Destroy()
+        Library.BlurEffect = nil
     end
 
     if ScreenGui then
