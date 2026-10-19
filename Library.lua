@@ -20913,6 +20913,18 @@ function Library:CreateWindow(WindowInfo)
             Parent = TabWide,
         })
 
+        --// With full width groupboxes the whole page scrolls as one (columns stop scrolling on their own) \\--
+        local TabPageScroll = New("ScrollingFrame", {
+            AutomaticCanvasSize = Enum.AutomaticSize.Y,
+            BackgroundTransparency = 1,
+            CanvasSize = UDim2.fromOffset(0, 0),
+            ScrollBarThickness = 0,
+            ScrollingDirection = Enum.ScrollingDirection.Y,
+            Size = UDim2.fromScale(1, 1),
+            Visible = false,
+            Parent = TabContainer,
+        })
+
         --// Tab Table \\--
         local Tab = {
             Name = Name,
@@ -20932,6 +20944,7 @@ function Library:CreateWindow(WindowInfo)
             Sides = {
                 TabLeft,
                 TabRight,
+                TabPageScroll,
             },
             WarningBox = {
                 IsNormal = false,
@@ -21091,24 +21104,65 @@ function Library:CreateWindow(WindowInfo)
         function Tab:RefreshSides()
             local WarningOffset = WarningBoxHolder.Visible and WarningBox.Size.Y.Offset + 8 or 0
 
-            --// the full width area sits under the warning box, the two columns start under the full width area \--
-            local function Apply(Left, Right, Wide)
-                local Offset = WarningOffset
-                if Wide then
-                    Wide.Position = UDim2.new(0, 0, 0, WarningOffset)
-                    Offset += Wide.AbsoluteSize.Y / Library.DPIScale
-                end
-
-                for _, Side in { Left, Right } do
-                    Side.Position = UDim2.new(Side.Position.X.Scale, 0, 0, Offset)
-                    Side.Size = UDim2.new(0.5, -3, 1, -Offset)
+            local function SetParent(Object, Parent)
+                if Object.Parent ~= Parent then
+                    Object.Parent = Parent
                 end
             end
 
-            Apply(TabLeft, TabRight, TabWide)
+            --// One page = the two columns + the full width area above them \--
+            local function Layout(Left, Right, Wide, Scroll, Parent)
+                local HasWide = false
+                for _, Child in Wide:GetChildren() do
+                    if Child:IsA("GuiObject") and Child.Visible then
+                        HasWide = true
+                        break
+                    end
+                end
+
+                if not HasWide then
+                    --// normal: every column scrolls on its own \--
+                    Scroll.Visible = false
+                    SetParent(Wide, Parent)
+                    SetParent(Left, Parent)
+                    SetParent(Right, Parent)
+
+                    Wide.Position = UDim2.new(0, 0, 0, WarningOffset)
+                    for _, Side in { Left, Right } do
+                        Side.ScrollingEnabled = true
+                        Side.Position = UDim2.new(Side.Position.X.Scale, 0, 0, WarningOffset)
+                        Side.Size = UDim2.new(0.5, -3, 1, -WarningOffset)
+                    end
+
+                    return
+                end
+
+                --// full width groupboxes: wide area + columns live in one scrolling page \--
+                Scroll.Position = UDim2.fromOffset(0, WarningOffset)
+                Scroll.Size = UDim2.new(1, 0, 1, -WarningOffset)
+                Scroll.Visible = true
+
+                SetParent(Wide, Scroll)
+                SetParent(Left, Scroll)
+                SetParent(Right, Scroll)
+
+                Wide.Position = UDim2.fromOffset(0, 0)
+                local WideHeight = Wide.AbsoluteSize.Y / Library.DPIScale
+
+                for _, Side in { Left, Right } do
+                    local List = Side:FindFirstChildOfClass("UIListLayout")
+                    local ContentHeight = List and (List.AbsoluteContentSize.Y / Library.DPIScale + 4) or 0
+
+                    Side.ScrollingEnabled = false
+                    Side.Position = UDim2.new(Side.Position.X.Scale, 0, 0, WideHeight)
+                    Side.Size = UDim2.new(0.5, -3, 0, ContentHeight)
+                end
+            end
+
+            Layout(TabLeft, TabRight, TabWide, TabPageScroll, TabContainer)
             if Tab.SubPages then
                 for _, SubPage in Tab.SubPages do
-                    Apply(SubPage.Sides[1], SubPage.Sides[2], SubPage.Wide)
+                    Layout(SubPage.Sides[1], SubPage.Sides[2], SubPage.Wide, SubPage.PageScroll, SubPage.Container)
                 end
             end
         end
@@ -21116,6 +21170,16 @@ function Library:CreateWindow(WindowInfo)
         TabWide:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
             Tab:RefreshSides()
         end)
+
+        --// the page height follows the columns while a full width groupbox is shown \--
+        for _, Side in { TabLeft, TabRight } do
+            local List = Side:FindFirstChildOfClass("UIListLayout")
+            if List then
+                List:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+                    Tab:RefreshSides()
+                end)
+            end
+        end
 
         function Tab:Resize(ResizeWarningBox: boolean?)
             if ResizeWarningBox then
@@ -22077,6 +22141,26 @@ function Library:CreateWindow(WindowInfo)
                 Tab:RefreshSides()
             end)
 
+            local SubScroll = New("ScrollingFrame", {
+                AutomaticCanvasSize = Enum.AutomaticSize.Y,
+                BackgroundTransparency = 1,
+                CanvasSize = UDim2.fromOffset(0, 0),
+                ScrollBarThickness = 0,
+                ScrollingDirection = Enum.ScrollingDirection.Y,
+                Size = UDim2.fromScale(1, 1),
+                Visible = false,
+                Parent = SubContainer,
+            })
+
+            for _, Side in { SubLeft, SubRight } do
+                local List = Side:FindFirstChildOfClass("UIListLayout")
+                if List then
+                    List:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+                        Tab:RefreshSides()
+                    end)
+                end
+            end
+
             --// Button (displayed on the left of the search bar) \\--
             local Style = SubPageStyle
             local ParsedIcon = Library:GetCustomIcon(SubIcon)
@@ -22164,8 +22248,9 @@ function Library:CreateWindow(WindowInfo)
                 Tab = Tab,
                 Button = Button,
                 Container = SubContainer,
-                Sides = { SubLeft, SubRight },
+                Sides = { SubLeft, SubRight, SubScroll },
                 Wide = SubWide,
+                PageScroll = SubScroll,
             }
 
             local function ApplyCorner()
@@ -22380,7 +22465,7 @@ function Library:CreateWindow(WindowInfo)
                     if Next then
                         Next:Show()
                     else
-                        Tab.Sides = { TabLeft, TabRight }
+                        Tab.Sides = { TabLeft, TabRight, TabPageScroll }
                         TabLeft.Visible = true
                         TabRight.Visible = true
                         Tab:RefreshSides()
